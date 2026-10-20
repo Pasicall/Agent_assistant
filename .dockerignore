@@ -1,0 +1,11 @@
+.git
+.env*
+.secrets
+.test-tmp
+**/node_modules
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/data
+artifacts
+docs
