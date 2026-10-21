@@ -45,8 +45,10 @@ class KnowledgeBase(Base):
     name: Mapped[str] = mapped_column(String(120))
     description: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # Legacy compatibility only: never set through the personal API; non-null bases stay inaccessible.
     organization_id: Mapped[str | None] = mapped_column(ForeignKey("organizations.id"), index=True)
     generation: Mapped[int] = mapped_column(Integer, default=0)
+    # Retained for the existing schema, without sharing or role semantics in the application.
     visibility: Mapped[str] = mapped_column(String(20), default="organization")
 
 

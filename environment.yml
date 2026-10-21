@@ -1,0 +1,10 @@
+# From the repository root: conda env create --prefix ./.conda-env --file environment.yml
+name: personal-learning-assistant
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - nodejs=22
+  - pip
+  - pip:
+      - -e ./backend[dev,ml,evaluation]

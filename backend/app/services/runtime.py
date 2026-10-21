@@ -13,7 +13,7 @@ def capabilities() -> dict:
         "reranker": s.reranker_model or "disabled", "vector_store": "qdrant-server" if s.qdrant_url else "qdrant-local",
         "queue": "redis+sql-durable" if s.redis_url else "sql-durable-local", "max_upload_mb": s.max_upload_mb,
         "features": {"hybrid_retrieval": True, "bounded_agent": True, "ocr_configured": s.ocr_enabled,
-            "organization_roles": True, "revocable_sessions": True, "oidc_configured": bool(s.oidc_issuer),
+            "revocable_sessions": True,
             "persistent_bm25": True, "document_versions": True, "async_evaluations": True,
             "durable_cleanup": True, "provider_streaming": True, "citation_verifier": s.citation_verifier,
             "folder_sync_configured": bool(s.source_sync_root), "metrics_configured": bool(s.metrics_token),

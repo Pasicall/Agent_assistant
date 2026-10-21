@@ -10,7 +10,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.models import AuthSession, ChatRequestRun, Conversation, KnowledgeBase, Message, User, new_id, utcnow
-from app.services.access import allowed_kbs, audit
+from app.services.access import allowed_kbs
 from app.services.admission import capacity, consume
 from app.services.corpus import CorpusScope
 
@@ -18,8 +18,6 @@ from app.services.corpus import CorpusScope
 def run_chat(body, db, user, request, emit=None, cancelled=None):
     from app.services.answering import PROMPT_VERSION, answer_question
     settings, database = request.app.state.settings, request.app.state.database
-    from app.services.operations import effective_settings
-    settings = effective_settings(db, settings, user.id)
     key = body.request_id or new_id()
     digest = hashlib.sha256(json.dumps(body.model_dump(exclude={"request_id"}), sort_keys=True).encode()).hexdigest()
     conversation = db.scalar(select(Conversation).where(Conversation.id == body.conversation_id,
@@ -104,7 +102,7 @@ def run_chat(body, db, user, request, emit=None, cancelled=None):
             result = answer_question(body.question, scope, **kwargs)
             if cancelled and cancelled():
                 raise HTTPException(499, "请求已取消")
-            # Refresh authorization after the long model call, before returning shared knowledge.
+            # Refresh authorization after the long model call, before returning evidence.
             db.expire_all()
             login = db.get(AuthSession, request.state.session_id)
             actor = db.get(User, user.id)
@@ -135,7 +133,6 @@ def run_chat(body, db, user, request, emit=None, cancelled=None):
             db.flush()
             result.update(conversation_id=conversation_id, message_id=assistant.id, request_id=key)
             db.execute(update(ChatRequestRun).where(ChatRequestRun.id == run_id).values(status="completed", result=result))
-            audit(db, user.id, "chat.complete", conversation_id, request_id=key)
             db.commit()
             return result
         except BaseException:

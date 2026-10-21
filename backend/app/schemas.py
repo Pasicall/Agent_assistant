@@ -24,17 +24,6 @@ class RegisterRequest(LoginRequest):
 class KnowledgeBaseRequest(StrictRequest):
     name: str = Field(min_length=1, max_length=120)
     description: str = Field(default="", max_length=2000)
-    organization_id: str | None = None
-    visibility: Literal["organization", "restricted"] = "organization"
-
-
-class OrganizationRequest(StrictRequest):
-    name: str = Field(min_length=1, max_length=120)
-
-
-class MemberRequest(StrictRequest):
-    email: str = Field(min_length=3, max_length=254)
-    role: Literal["admin", "editor", "reader"] = "reader"
 
 
 class DocumentMetadataRequest(StrictRequest):

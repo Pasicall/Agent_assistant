@@ -59,15 +59,10 @@ class Settings(BaseSettings):
     metrics_token: str = ""
     cookie_secure: bool = False
     public_base_url: str = "http://localhost:5173"
-    oidc_issuer: str = ""
-    oidc_client_id: str = ""
-    oidc_client_secret: str = ""
-    oidc_redirect_uri: str = "http://localhost:5173/api/auth/oidc/callback"
     citation_verifier: str = "numeric"  # numeric | llm; numeric is explicitly a partial check
     verifier_model: str = ""
     evidence_min_coverage: float = Field(default=0.25, ge=0, le=1)
     source_sync_root: Path | None = None
-    platform_admin_emails: list[str] = []
     pdf_vision_all_pages: bool = False
     ocr_timeout: int = Field(default=60, ge=5, le=300)
 
@@ -83,8 +78,6 @@ class Settings(BaseSettings):
             raise ValueError("citation_verifier must be numeric or llm")
         if self.worker_role not in {"all", "ingestion", "evaluation"}:
             raise ValueError("worker_role must be all, ingestion or evaluation")
-        if self.oidc_issuer and (not self.oidc_issuer.startswith("https://") or not self.oidc_client_id):
-            raise ValueError("OIDC requires an HTTPS issuer and client_id")
         if self.environment.lower() == "production":
             if len(self.secret_key) < 32 or self.secret_key.startswith("development-only"):
                 raise ValueError("Production requires a unique RAG_SECRET_KEY of at least 32 characters")

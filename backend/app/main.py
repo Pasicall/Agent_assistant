@@ -121,12 +121,10 @@ def create_app(settings=None):
         return response
 
     app.include_router(router)
-    from app.api.enterprise import router as enterprise_router
-    app.include_router(enterprise_router)
-    from app.api.oidc import router as oidc_router
-    app.include_router(oidc_router)
-    from app.api.platform import router as platform_router
-    app.include_router(platform_router)
+    from app.api.document_lifecycle import router as document_lifecycle_router
+    app.include_router(document_lifecycle_router)
+    from app.api.diagnostics import router as diagnostics_router
+    app.include_router(diagnostics_router)
     return app
 
 

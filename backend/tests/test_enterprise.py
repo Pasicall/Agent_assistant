@@ -1,4 +1,4 @@
-"""Enterprise regressions: real DB transactions, ACL revocation, failures and versions."""
+"""Preserved regressions from the former mixed enterprise module: sessions, jobs and versions."""
 import json
 import threading
 from datetime import timedelta
@@ -9,71 +9,11 @@ from sqlalchemy import select, update
 from test_api import create_kb, register, upload, wait_job
 
 
-def shared_space(client, owner, reader):
-    org = client.post('/api/organizations', headers=owner, json={'name': '测试团队'}).json()['id']
-    response = client.put(f'/api/organizations/{org}/members', headers=owner,
-                          json={'email': 'reader@example.com', 'role': 'reader'})
-    assert response.status_code == 200, response.text
-    kb = client.post('/api/knowledge-bases', headers=owner,
-                     json={'name': '组织制度', 'organization_id': org}).json()['id']
-    return org, kb
-
-
 def ask(client, headers, kb, **kwargs):
     response = client.post('/api/chat', headers=headers,
         json={'question': '住宿报销上限是多少', 'knowledge_base_ids': [kb], **kwargs})
     assert response.status_code == 200, response.text
     return response.json()
-
-
-def test_organization_roles_and_history_revocation(client):
-    owner, reader = register(client), register(client, 'reader@example.com')
-    org, kb = shared_space(client, owner, reader)
-    result = upload(client, owner, kb, '住宿报销上限500元。'.encode())
-    assert wait_job(client, owner, result['job_id'])['status'] == 'completed'
-    doc = result['document']['id']
-    assert client.get('/api/knowledge-bases', headers=reader).json()[0]['role'] == 'reader'
-    assert client.get(f'/api/documents/{doc}/download', headers=reader).status_code == 200
-    assert client.post('/api/documents/upload', headers=reader, data={'knowledge_base_id': kb},
-        files={'file': ('x.txt', b'private')}).status_code == 403
-    assert client.post(f'/api/documents/{doc}/retry', headers=reader).status_code == 403
-    assert client.patch(f'/api/documents/{doc}/metadata', headers=reader, json={'source': 'x'}).status_code == 403
-    assert client.delete(f'/api/documents/{doc}', headers=reader).status_code == 403
-    answer = ask(client, reader, kb, request_id='shared-request-1')
-    assert '500' in answer['answer']
-    reader_id = client.get('/api/auth/me', headers=reader).json()['id']
-    assert client.delete(f'/api/organizations/{org}/members/{reader_id}', headers=owner).status_code == 204
-    assert client.get('/api/auth/me', headers=reader).status_code == 401
-    response = client.post('/api/auth/login', json={'email': 'reader@example.com', 'password': 'correct horse 47'})
-    reader = {'Authorization': 'Bearer ' + response.json()['access_token']}
-    assert client.get('/api/knowledge-bases', headers=reader).json() == []
-    assert client.get(f'/api/documents/{doc}/versions', headers=reader).status_code == 404
-    history = client.get('/api/conversations/' + answer['conversation_id'], headers=reader).json()
-    assert history['messages'][1]['citations'] == [] and '500' not in history['messages'][1]['content']
-    assert client.post('/api/chat', headers=reader, json={'question': '住宿报销上限是多少',
-        'knowledge_base_ids': [kb], 'request_id': 'shared-request-1'}).status_code == 404
-
-
-def test_last_admin_protection_and_audit_visibility(client):
-    owner, reader = register(client), register(client, 'reader@example.com')
-    org, kb = shared_space(client, owner, reader)
-    owner_id = client.get('/api/auth/me', headers=owner).json()['id']
-    assert client.delete(f'/api/organizations/{org}/members/{owner_id}', headers=owner).status_code == 409
-    assert client.put(f'/api/organizations/{org}/members', headers=owner,
-        json={'email': 'owner@example.com', 'role': 'reader'}).status_code == 409
-    assert client.get('/api/audit-events', headers=reader, params={'organization_id': org}).status_code == 403
-    uploaded = upload(client, owner, kb, '住宿报销上限500元。'.encode())
-    wait_job(client, owner, uploaded['job_id'])
-    doc = uploaded['document']['id']
-    assert client.patch(f'/api/documents/{doc}/metadata', headers=owner, json={'source': 'audit-fixture'}).status_code == 200
-    revision = client.get(f'/api/documents/{doc}/versions', headers=owner).json()[0]['id']
-    restored = client.post(f'/api/documents/{doc}/versions/{revision}/restore', headers=owner)
-    assert restored.status_code == 202
-    wait_job(client, owner, restored.json()['job_id'])
-    events = client.get('/api/audit-events', headers=owner, params={'organization_id': org}).json()
-    assert any(row['action'] == 'membership.set_role.reader' for row in events)
-    assert {row['action'] for row in events if row['resource_id'] == doc} >= {'document.metadata', 'document.restore'}
-    assert 'correct horse' not in json.dumps(events)
 
 
 def test_session_revocation_and_cookie_csrf(client):
@@ -329,3 +269,32 @@ def test_legacy_database_migrates_without_losing_content(tmp_path):
         assert doc.active_revision_id == chunk.revision_id and chunk.text == '报销500元'
         assert db.scalar(select(ChunkTerm).where(ChunkTerm.chunk_id == 'c'))
     database.engine.dispose()
+
+
+def test_diagnostics_preserve_authentication_and_independent_metrics_credential(client, monkeypatch):
+    from app import health
+    assert client.get('/api/ready/models').status_code == 401
+    assert client.get('/api/metrics').status_code == 404
+    owner = register(client)
+    monkeypatch.setattr(health, 'model_checks', lambda _: {'embedding': 'configured'})
+    assert client.get('/api/ready/models', headers=owner).json()['checks'] == {'embedding': 'configured'}
+    monkeypatch.setattr(client.app.state.settings, 'metrics_token', 'independent-metrics-token')
+    assert client.get('/api/metrics', headers=owner).status_code == 401
+    assert client.get('/api/metrics', headers={'Authorization': 'Bearer independent-metrics-token'}).status_code == 200
+    assert client.delete('/api/auth/sessions', headers=owner).status_code == 204
+    assert client.get('/api/auth/me', headers=owner).status_code == 401
+
+
+def test_source_sync_rejects_unconfigured_root_and_escaping_symlinks(client, tmp_path, monkeypatch):
+    headers = register(client)
+    kb = create_kb(client, headers)
+    body = {'knowledge_base_id': kb, 'relative_path': '.'}
+    assert client.post('/api/sources/sync', headers=headers, json=body).status_code == 503
+    root = tmp_path / 'configured-source'
+    root.mkdir()
+    outside = tmp_path / 'outside.txt'
+    outside.write_text('must not be imported')
+    (root / 'escape.txt').symlink_to(outside)
+    monkeypatch.setattr(client.app.state.settings, 'source_sync_root', root)
+    assert client.post('/api/sources/sync', headers=headers, json=body).status_code == 422
+    assert client.get('/api/documents', headers=headers).json() == []

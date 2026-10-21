@@ -21,7 +21,6 @@ from app.models import (
     EvaluationRun,
     IngestionJob,
     KnowledgeBase,
-    KnowledgeBaseGrant,
     Message,
     User,
     new_id,
@@ -36,7 +35,7 @@ from app.schemas import (
     RegisterRequest,
 )
 from app.security import hash_password, issue_token, verify_password
-from app.services.access import allowed_kbs, audit, kb_role, require_kb
+from app.services.access import allowed_kbs, require_kb
 from app.services.admission import consume
 from app.worker import notify_job
 
@@ -45,10 +44,8 @@ logger = logging.getLogger(__name__)
 ALLOWED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
 
 
-def user_payload(user, settings=None):
-    from app.services.operations import is_platform_admin
-    return {"id": user.id, "email": user.email, "name": user.name,
-            "is_platform_admin": bool(settings and is_platform_admin(user, settings))}
+def user_payload(user):
+    return {"id": user.id, "email": user.email, "name": user.name}
 
 
 def auth_payload(user, request, db, response):
@@ -57,23 +54,17 @@ def auth_payload(user, request, db, response):
     db.add(session)
     db.flush()
     token = issue_token(user.id, settings, session.id)
-    audit(db, user.id, "session.create", session.id)
     db.commit()
     response.set_cookie("rag_session", token, httponly=True, samesite="lax", path="/api",
         secure=settings.cookie_secure or settings.public_base_url.startswith("https://"), max_age=settings.token_lifetime_seconds)
-    return {"access_token": token, "token_type": "bearer", "user": user_payload(user, settings)}
+    return {"access_token": token, "token_type": "bearer", "user": user_payload(user)}
 
 
-def own_kb(db, user, kb_id, action="read"):
-    return require_kb(db, user, kb_id, action)
-
-
-def own_document(db, user, document_id, action="read"):
+def own_document(db, user, document_id):
     document = db.scalar(select(Document).join(KnowledgeBase).where(
         Document.id == document_id, allowed_kbs(user.id)))
     if document is None:
         raise HTTPException(404, "文档不存在")
-    require_kb(db, user, document.knowledge_base_id, action)
     return document
 
 
@@ -125,7 +116,7 @@ def health():
 def register(body: RegisterRequest, request: Request, response: Response, db: DB):
     settings = request.app.state.settings
     if not settings.allow_registration:
-        raise HTTPException(403, "当前工作区已关闭公开注册，请使用企业账号登录")
+        raise HTTPException(403, "当前工作区已关闭公开注册，请使用已有账号登录")
     consume(request.app.state.database, f"auth:{request.client.host}", settings.auth_rate_per_minute)
     user = User(email=body.email, name=body.name, password_hash=hash_password(body.password))
     db.add(user)
@@ -149,15 +140,14 @@ def login(body: LoginRequest, request: Request, response: Response, db: DB):
 
 
 @router.get("/auth/me")
-def me(user: CurrentUser, request: Request):
-    return user_payload(user, request.app.state.settings)
+def me(user: CurrentUser):
+    return user_payload(user)
 
 
 @router.post("/auth/logout", status_code=204)
 def logout(request: Request, response: Response, db: DB, user: CurrentUser):
     session = db.get(AuthSession, request.state.session_id)
     session.revoked = True
-    audit(db, user.id, "session.revoke", session.id)
     db.commit()
     response.delete_cookie("rag_session", path="/api")
 
@@ -165,7 +155,6 @@ def logout(request: Request, response: Response, db: DB, user: CurrentUser):
 @router.delete("/auth/sessions", status_code=204)
 def revoke_sessions(db: DB, user: CurrentUser):
     db.execute(update(AuthSession).where(AuthSession.user_id == user.id).values(revoked=True))
-    audit(db, user.id, "session.revoke_all", user.id)
     db.commit()
 
 
@@ -174,29 +163,17 @@ def knowledge_bases(db: DB, user: CurrentUser):
     query = select(KnowledgeBase, func.count(Document.id)).outerjoin(Document).where(
         allowed_kbs(user.id)).group_by(KnowledgeBase.id).order_by(KnowledgeBase.created_at.desc())
     return [{"id": kb.id, "name": kb.name, "description": kb.description,
-             "created_at": kb.created_at, "document_count": count, "organization_id": kb.organization_id,
-             "visibility": kb.visibility, "role": kb_role(db, user, kb)}
+             "created_at": kb.created_at, "document_count": count}
             for kb, count in db.execute(query).all()]
 
 
 @router.post("/knowledge-bases", status_code=201)
 def create_knowledge_base(body: KnowledgeBaseRequest, db: DB, user: CurrentUser):
-    if body.organization_id:
-        from app.services.access import require_org
-        member = require_org(db, user, body.organization_id)
-        if member.role not in {"admin", "editor"}:
-            raise HTTPException(403, "当前角色不能创建知识库")
-    kb = KnowledgeBase(user_id=user.id, name=body.name, description=body.description,
-                       organization_id=body.organization_id, visibility=body.visibility)
+    kb = KnowledgeBase(user_id=user.id, name=body.name, description=body.description)
     db.add(kb)
-    db.flush()
-    if body.organization_id and body.visibility == "restricted":
-        db.add(KnowledgeBaseGrant(knowledge_base_id=kb.id, user_id=user.id, role="admin"))
-    audit(db, user.id, "knowledge_base.create", kb.id, kb.organization_id)
     db.commit()
     return {"id": kb.id, "name": kb.name, "description": kb.description,
-            "created_at": kb.created_at, "document_count": 0, "organization_id": kb.organization_id,
-            "visibility": kb.visibility, "role": kb_role(db, user, kb)}
+            "created_at": kb.created_at, "document_count": 0}
 
 
 def remove_documents(db, documents, settings):
@@ -223,7 +200,7 @@ def unlink_uploads(paths, settings):
 
 @router.delete("/knowledge-bases/{kb_id}", status_code=204)
 def delete_knowledge_base(kb_id: str, request: Request, db: DB, user: CurrentUser):
-    own_kb(db, user, kb_id, "admin")
+    require_kb(db, user, kb_id)
     kb = db.scalar(select(KnowledgeBase).where(KnowledgeBase.id == kb_id).with_for_update())
     if kb is None:
         raise HTTPException(404, "知识库不存在")
@@ -232,7 +209,6 @@ def delete_knowledge_base(kb_id: str, request: Request, db: DB, user: CurrentUse
     db.execute(update(KnowledgeBase).where(KnowledgeBase.id == kb.id).values(name=kb.name))
     documents = db.scalars(select(Document).where(Document.knowledge_base_id == kb.id)).all()
     remove_documents(db, documents, request.app.state.settings)
-    audit(db, user.id, "knowledge_base.delete", kb.id, kb.organization_id)
     db.delete(kb)
     db.commit()
     # External cleanup is asynchronous; SQL visibility changes immediately.
@@ -242,7 +218,7 @@ def delete_knowledge_base(kb_id: str, request: Request, db: DB, user: CurrentUse
 def documents(db: DB, user: CurrentUser, knowledge_base_id: str | None = None):
     query = select(Document).join(KnowledgeBase).where(allowed_kbs(user.id))
     if knowledge_base_id:
-        own_kb(db, user, knowledge_base_id)
+        require_kb(db, user, knowledge_base_id)
         query = query.where(Document.knowledge_base_id == knowledge_base_id)
     return [document_payload(db, item) for item in db.scalars(query.order_by(Document.created_at.desc())).all()]
 
@@ -251,8 +227,8 @@ def documents(db: DB, user: CurrentUser, knowledge_base_id: str | None = None):
 async def upload_document(request: Request, db: DB, user: CurrentUser,
                           file: Annotated[UploadFile, File()], knowledge_base_id: Annotated[str, Form()],
                           document_id: Annotated[str | None, Form()] = None):
-    kb = own_kb(db, user, knowledge_base_id, "write")
-    replacing = own_document(db, user, document_id, "write") if document_id else None
+    kb = require_kb(db, user, knowledge_base_id)
+    replacing = own_document(db, user, document_id) if document_id else None
     if replacing and replacing.knowledge_base_id != kb.id:
         raise HTTPException(422, "文档不属于所选知识库")
     if replacing and replacing.status not in {"ready", "failed"}:
@@ -301,8 +277,6 @@ async def upload_document(request: Request, db: DB, user: CurrentUser,
         document.status, document.error = "queued", None
         job = IngestionJob(document_id=document.id, revision_id=revision.id)
         db.add(job)
-        audit(db, user.id, "document.version.upload" if replacing else "document.upload", document.id, kb.organization_id,
-              getattr(request.state, "request_id", ""))
         db.commit()
         committed = True
         notify_job(settings, job.id)
@@ -330,27 +304,23 @@ def download_document(document_id: str, request: Request, db: DB, user: CurrentU
     path = Path(document.stored_path).resolve()
     if not path.is_relative_to((request.app.state.settings.data_dir / "uploads").resolve()) or not path.is_file():
         raise HTTPException(404, "原文件不存在")
-    kb = own_kb(db, user, document.knowledge_base_id)
-    audit(db, user.id, "document.download", document.id, kb.organization_id)
-    db.commit()
     return FileResponse(path, filename=document.name, media_type="application/octet-stream",
                         headers={"X-Content-Type-Options": "nosniff"})
 
 
 @router.delete("/documents/{document_id}", status_code=204)
 def delete_document_api(document_id: str, request: Request, db: DB, user: CurrentUser):
-    document = own_document(db, user, document_id, "write")
-    kb = own_kb(db, user, document.knowledge_base_id)
+    document = own_document(db, user, document_id)
+    kb = require_kb(db, user, document.knowledge_base_id)
     remove_documents(db, [document], request.app.state.settings)
     kb.generation += 1
-    audit(db, user.id, "document.delete", document_id, kb.organization_id)
     db.commit()
     # The committed outbox survives a storage outage and is retried by the worker.
 
 
 @router.post("/documents/{document_id}/retry")
 def retry_document(document_id: str, request: Request, db: DB, user: CurrentUser):
-    document = own_document(db, user, document_id, "write")
+    document = own_document(db, user, document_id)
     from app.services.lifecycle import reserve_ingestion
     reserve_ingestion(db, user, document.knowledge_base_id, request.app.state.settings)
     if document.status not in {"failed", "ready"}:
@@ -365,7 +335,6 @@ def retry_document(document_id: str, request: Request, db: DB, user: CurrentUser
     db.flush()
     job = IngestionJob(document_id=document_id, revision_id=revision.id)
     db.add(job)
-    audit(db, user.id, "document.reindex", document_id, own_kb(db, user, document.knowledge_base_id).organization_id)
     db.commit()
     notify_job(request.app.state.settings, job.id)
     return {"job_id": job.id}
@@ -525,8 +494,7 @@ def create_evaluation(body: EvaluationRequest, request: Request, db: DB, user: C
                 raise HTTPException(400, "历史答案缺少对应问题")
             case.update(question=question_message.content, recorded_answer=recorded.content,
                 recorded_citations=recorded.citations or [])
-    from app.services.operations import effective_settings
-    settings = effective_settings(db, request.app.state.settings, user.id)
+    settings = request.app.state.settings
     consume(request.app.state.database, f"evaluation:{user.id}", 5, 60)
     consume(request.app.state.database, f"model-budget:{user.id}", settings.user_daily_model_requests,
             86400, cost=len(cases) * (6 if body.use_ragas else 1))
@@ -534,7 +502,6 @@ def create_evaluation(body: EvaluationRequest, request: Request, db: DB, user: C
         knowledge_base_ids=body.knowledge_base_ids, use_ragas=body.use_ragas)
     db.add(run)
     db.flush()
-    audit(db, user.id, "evaluation.create", run.id)
     db.commit()
     notify_job(settings, run.id)
     return evaluation_payload(run, db, user)

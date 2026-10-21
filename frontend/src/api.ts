@@ -1,5 +1,5 @@
-export type User = { id: string; email: string; name: string; is_platform_admin?: boolean }
-export type KnowledgeBase = { id: string; name: string; description: string; created_at: string; document_count: number; organization_id?: string; visibility?: 'organization' | 'restricted'; role: 'admin' | 'editor' | 'reader' }
+export type User = { id: string; email: string; name: string }
+export type KnowledgeBase = { id: string; name: string; description: string; created_at: string; document_count: number }
 export type Document = { id: string; knowledge_base_id: string; name: string; size_bytes: number; status: string; chunk_count: number; error?: string; created_at: string; job_id?: string; active_revision_id?: string; source?: string; expires_at?: string }
 export type Job = { id: string; status: string; progress: number; error?: string; document_id: string; stage?: string; processed_pages?: number; total_pages?: number }
 export type Chunk = { id: string; text: string; page: number | null; ordinal: number }

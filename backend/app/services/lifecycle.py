@@ -7,13 +7,11 @@ from app.services.access import require_kb
 
 
 def reserve_ingestion(db, user, kb_id, settings, extra_bytes=0):
-    kb = require_kb(db, user, kb_id, "write")
+    kb = require_kb(db, user, kb_id)
     owner_id = db.scalar(select(User.id).where(User.id == kb.user_id).with_for_update())
-    from app.services.operations import effective_settings
-    settings = effective_settings(db, settings, owner_id)
     db.execute(update(User).where(User.id == owner_id).values(name=User.name))
     db.expire_all()
-    require_kb(db, user, kb_id, "write")
+    require_kb(db, user, kb_id)
     # Reindex/restore may share immutable source files; charge each stored file once.
     files = select(DocumentRevision.stored_path, func.max(DocumentRevision.size_bytes).label("bytes"))
     files = files.join(Document).join(KnowledgeBase).where(KnowledgeBase.user_id == owner_id)

@@ -24,3 +24,8 @@ data/
 .vscode/
 artifacts/
 !docs/artifacts/
+# Local agent instructions and implementation plan.
+AGENT.md
+personal-learning-assistant-plan.md
+# Project-local Conda installation; environment.yml remains versioned.
+.conda-env/
