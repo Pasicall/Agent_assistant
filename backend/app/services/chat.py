@@ -10,7 +10,7 @@ from sqlalchemy import func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.models import AuthSession, ChatRequestRun, Conversation, KnowledgeBase, Message, User, new_id, utcnow
-from app.services.access import allowed_kbs
+from app.services.access import allowed_kbs, citations_available
 from app.services.admission import capacity, consume
 from app.services.corpus import CorpusScope
 
@@ -79,9 +79,8 @@ def run_chat(body, db, user, request, emit=None, cancelled=None):
         try:
             messages = db.scalars(select(Message).where(Message.conversation_id == conversation_id)
                 .order_by(Message.created_at.desc(), Message.id.desc()).limit(6)).all()
-            accessible = set(db.scalars(select(KnowledgeBase.id).where(allowed_kbs(user.id))).all())
             history = [{"role": m.role, "content": m.content} for m in reversed(messages)
-                if not any(c.get("knowledge_base_id") not in accessible for c in (m.citations or []))]
+                if citations_available(db, user.id, m.citations)]
             kwargs = {"top_k": body.top_k, "mode": body.mode, "history": history}
             if emit is not None:
                 last_checked = 0

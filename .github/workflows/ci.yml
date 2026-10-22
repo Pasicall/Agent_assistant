@@ -21,10 +21,13 @@ jobs:
       - run: python -m pytest -q
         working-directory: backend
       - run: python scripts/benchmark.py --load-chunks 5000 --queries 40 --output artifacts/benchmark-ci.json
+      - run: python scripts/validate-personal.py --lifecycle --output artifacts/personal-ci.json
       - uses: actions/upload-artifact@v4
         with:
           name: business-regression-and-capacity
-          path: artifacts/benchmark-ci.json
+          path: |
+            artifacts/benchmark-ci.json
+            artifacts/personal-ci.json
   infrastructure:
     runs-on: ubuntu-latest
     services:

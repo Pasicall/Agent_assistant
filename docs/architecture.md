@@ -1,6 +1,6 @@
 # 系统架构
 
-知衡以文档为知识入口，以可追溯的证据组织回答，将知识库管理、异步摄取、混合检索、对话与评测连接为完整工作流。系统采用 FastAPI + Vue 架构，支持本地模型和 OpenAI 兼容服务，面向文档密集的私有知识管理场景。
+知衡以文档为知识入口，以可追溯的证据组织回答，将知识库管理、异步摄取、混合检索、对话与评测连接为完整工作流。系统采用 FastAPI + Vue 架构，支持本地模型和 OpenAI 兼容服务，面向个人学习资料管理场景。
 
 设计目标与技术选型见[设计原则与技术参考](design.md)，运行方式见[部署指南](deployment.md)。
 
@@ -8,8 +8,8 @@
 
 ```mermaid
 flowchart TD
-    UI[Vue 3 / TypeScript] --> API[FastAPI / Cookie / Bearer / OIDC]
-    API --> ACL[组织角色 / 知识库授权 / 会话访问]
+    UI[Vue 3 / TypeScript] --> API[FastAPI / Cookie / Bearer]
+    API --> ACL[个人所有权 / 会话访问]
     ACL --> SQL[(PostgreSQL / 开发可用 SQLite)]
     ACL --> Upload[流式上传 / 限额校验 / SHA256 去重]
     Upload --> Files[原文件存储]
@@ -44,9 +44,9 @@ API 负责账户、知识库、文档与对话接口；Worker 执行解析和索
 
 ## 身份与知识范围
 
-账户使用 PBKDF2-SHA256 密码与可撤销服务端会话。浏览器使用 HttpOnly Cookie，接口也支持显式 Bearer token。Cookie 请求执行来源与跨站标记检查；企业登录可接入 OIDC Authorization Code + PKCE。
+账户使用 PBKDF2-SHA256 密码与可撤销服务端会话。浏览器使用 HttpOnly Cookie，接口也支持显式 Bearer token。Cookie 请求执行来源与跨站标记检查。
 
-知识库支持个人空间、组织全员可见和指定成员可见。组织成员及知识库授权分别提供管理员、编辑、只读角色。统一访问策略用于文档、检索、引用、历史与评测，移除成员或授权后不再提供其旧来源内容。
+统一范围为知识库属于当前账号且 `organization_id IS NULL`。文档、检索、引用、历史和评测使用同一所有权策略。旧组织资料保留在兼容存储，不自动改归属；历史回答、评测与请求重放不能绕过当前范围。
 
 `CorpusScope` 在 SQL 中确定当前授权的活动版本及有效期。Qdrant 按允许知识库的 payload 过滤进行召回，SQL 再验证候选 chunk 的活动版本与有效性；词项检索在相同范围的倒排词频上计算 BM25。只有命中候选回查正文，不按全库分块列表构建请求过滤器。
 
@@ -120,7 +120,7 @@ CrossEncoder 由 RAG_RERANKER_MODEL 启用。该模式聚焦知识检索编排�
 | 对话上下文 / 最大输出 | 16384 / 2048 |
 | 服务隔离 | 独立 SQL 数据库、Redis 数据库与 Qdrant 集合前缀 |
 
-模型与依赖安装方式见[部署指南](deployment.md)。仓库中的[模型适配验证记录](artifacts/model-adapters-2026-10-16.json)记录了 CrossEncoder 实际推理与视觉转录检查。
+模型与依赖安装方式见[部署指南](deployment.md)。当前执行证据与未验证范围见[评测与验证](validation.md)。
 
 ## 评测闭环
 
@@ -130,12 +130,12 @@ CrossEncoder 由 RAG_RERANKER_MODEL 启用。该模式聚焦知识检索编排�
 
 历史评测通过 message_id 读取当前账户的已保存答案与引用，支持对同一回答反复评估；实时检索评测用于观察当前语料与配置。Ragas 判断缓存包含问题、答案、上下文、reference、模型与协议版本，只保存四项均有效的分数，并记录 judge_cached_cases、judge_scored_cases。评测执行采用单并发及有界超时、重试，控制模型资源占用。
 
-## 治理、可观测性与发布
+## 资源限制、可观测性与发布
 
-SQL 原子计数和过期并发槽实现跨 API 副本的限流、容量与请求预算。问答有请求幂等键及会话租约，消息记录提示词、模型配置、来源版本、实际用量、核验结果与阶段耗时。审计只保存操作人与资源标识，不记录密码、令牌或文档正文。
+SQL 原子计数和过期并发槽实现跨 API 副本的限流、容量与请求预算。问答有请求幂等键及会话租约，消息记录提示词、模型配置、来源版本、实际用量、核验结果与阶段耗时。资源限制直接来自静态 settings，不读取旧动态策略表。普通运行日志保留，操作审计业务已移除。
 
 `/api/health` 用于进程存活，`/api/ready` 检查 SQL、Redis、Qdrant 和 Worker 心跳，`/api/ready/models` 提供受登录保护的模型 API 探针。受独立凭证保护的 Prometheus 端点导出请求、阶段耗时、队列与恢复指标。HTTP 请求关联 ID 与生成运行元数据可以关联排障。
 
 Alembic 接管原有表结构并保留原分块 ID，将已有内容迁移为来源版本和持久倒排。Compose 先完成迁移，再启动应用与 Worker。离线维护命令协调 SQL、文件和向量快照，使用校验清单、空目标保护以及恢复后查询验证。
 
-完整操作与边界见[团队治理与可靠性](enterprise.md)和[部署指南](deployment.md)。
+兼容表和字段通过冻结的历史迁移保留；运行模型只保留组织外键的最小目标映射，不提供组织业务。完整操作与升级边界见[部署指南](deployment.md)。

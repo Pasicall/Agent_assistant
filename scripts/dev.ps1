@@ -1,28 +1,18 @@
 param(
     [ValidateSet('backend', 'frontend', 'worker', 'test')]
     [string]$Service = 'backend',
-    [string]$CondaEnv = 'cook-rag-1'
+    [string]$CondaEnv = ''
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$pythonCandidates = @(
-    "D:\ProgramData\anaconda3\envs\$CondaEnv\python.exe",
-    "$env:USERPROFILE\anaconda3\envs\$CondaEnv\python.exe",
-    "$env:USERPROFILE\miniconda3\envs\$CondaEnv\python.exe"
-)
-$pythonPath = $pythonCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if (-not $pythonPath) {
-    $pythonPath = (Get-Command python -ErrorAction Stop).Source
-}
+$condaArgs = if ($CondaEnv) { @('-n', $CondaEnv) } else { @('-p', (Join-Path $projectRoot '.conda-env')) }
 if ($Service -eq 'frontend') {
     Set-Location (Join-Path $projectRoot 'frontend')
-    & npm.cmd run dev -- --host 127.0.0.1
+    & conda run --no-capture-output @condaArgs npm.cmd run dev
 } else {
     Set-Location (Join-Path $projectRoot 'backend')
-    if ($Service -eq 'worker') { & $pythonPath -m app.worker }
-    elseif ($Service -eq 'test') {
-        New-Item -ItemType Directory -Path data -Force | Out-Null
-        & $pythonPath -m pytest -q --basetemp=./data/test-run
-    } else { & $pythonPath -m uvicorn app.main:app --host 127.0.0.1 --port 8010 }
+    if ($Service -eq 'worker') { & conda run --no-capture-output @condaArgs python -m app.worker }
+    elseif ($Service -eq 'test') { & conda run --no-capture-output @condaArgs python -m pytest -q }
+    else { & conda run --no-capture-output @condaArgs python -m uvicorn app.main:app --host 127.0.0.1 --port 8010 }
 }
 exit $LASTEXITCODE

@@ -203,11 +203,10 @@ def process_evaluation(database, settings, run_id):
             user = db.get(User, run.user_id)
             if user.disabled:
                 raise ValueError("账户已停用")
-            from app.services.access import allowed_kbs
-            accessible = set(db.scalars(select(KnowledgeBase.id).where(allowed_kbs(user.id))).all())
-            if any(c.get("knowledge_base_id") not in accessible for case in run.cases
-                   for c in case.get("recorded_citations", [])):
-                raise ValueError("历史证据的权限已撤销")
+            from app.services.access import citations_available
+            if not citations_available(db, user.id, [c for case in run.cases
+                    for c in case.get("recorded_citations", [])]):
+                raise ValueError("历史证据的来源已删除或不再可访问")
             scope = CorpusScope(db, user, run.knowledge_base_ids)
             fingerprint = scope.fingerprint()
             result = evaluate_cases(run.cases, scope, run.use_ragas)

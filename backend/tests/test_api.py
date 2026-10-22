@@ -209,3 +209,10 @@ def test_expired_tokens_and_production_configuration():
     assert token_subject(payload + "." + signature, settings) is None
     with pytest.raises(ValueError, match="RAG_SECRET_KEY"):
         Settings(environment="production", _env_file=None)
+
+
+def ask(client, headers, kb, **kwargs):
+    response = client.post('/api/chat', headers=headers,
+        json={'question': '住宿报销上限是多少', 'knowledge_base_ids': [kb], **kwargs})
+    assert response.status_code == 200, response.text
+    return response.json()

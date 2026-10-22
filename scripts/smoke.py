@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import secrets
 import sys
 import threading
@@ -129,7 +130,7 @@ def validate_answer(answer, chunks, kb_id, expected_document, expected_text, mod
 
 
 def qdrant_evidence(document_id, chunk_ids):
-    settings = dotenv_values(ROOT / ".env")
+    settings = {**dotenv_values(ROOT / ".env"), **{key: value for key, value in os.environ.items() if key.startswith("RAG_")}}
     headers = {"api-key": settings["RAG_QDRANT_API_KEY"]} if settings.get("RAG_QDRANT_API_KEY") else {}
     base = settings["RAG_QDRANT_URL"].rstrip("/")
     prefix = settings.get("RAG_QDRANT_COLLECTION_PREFIX", "rag_assistant") + "_"
@@ -148,7 +149,7 @@ def qdrant_evidence(document_id, chunk_ids):
             if points:
                 point = points[0]
                 require(point["payload"]["chunk_id"] in chunk_ids, "Qdrant point 与 SQL chunk 不一致")
-                require(len(point["vector"]) == 4096, "实际向量维度不是4096")
+                require(len(point["vector"]) == int(settings.get("RAG_EMBEDDING_DIMENSION", "384")), "实际向量维度与配置不一致")
                 require(any(value != 0 for value in point["vector"]), "实际向量为空")
                 return {"collection": name, "embedding_dimension": len(point["vector"]),
                         "sql_vector_chunk_match": True, "nonzero_vector": True}
@@ -252,7 +253,7 @@ def main():
     parser.add_argument("--with-ragas", action="store_true", help="调用真实本地评审模型，运行四个 Ragas 指标及缓存回放")
     parser.add_argument("--timeout", type=float, default=1800, help="单次本地模型/入库操作超时秒数")
     local_date = datetime.now(timezone(timedelta(hours=8))).date().isoformat()
-    parser.add_argument("--report", type=Path, default=ROOT / "docs" / "artifacts" / f"smoke-{local_date}.json")
+    parser.add_argument("--report", type=Path, default=ROOT / "artifacts" / f"smoke-{local_date}.json")
     args = parser.parse_args()
     parsed = urlsplit(args.base_url)
     require(parsed.hostname in {"127.0.0.1", "localhost"} and not parsed.username and not parsed.password,

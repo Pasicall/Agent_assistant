@@ -1,4 +1,4 @@
-"""Reuse an existing cook_rag local deployment without sharing its data namespace."""
+"""Reuse an explicitly selected local service configuration with a separate data namespace."""
 import argparse
 import json
 import secrets
@@ -69,21 +69,23 @@ def create_database(original, container: str):
                                  capture_output=True, text=True, timeout=20)
         if created.returncode:
             raise SystemExit("无法创建独立数据库 rag_knowledge_assistant；未写入 .env")
-    print("独立 PostgreSQL 数据库 rag_knowledge_assistant 已就绪；未更改 cookrag 数据。")
+    print("独立 PostgreSQL 数据库 rag_knowledge_assistant 已就绪；未更改来源数据库。")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source", type=Path, default=ROOT.parent / "code_c8" / ".env")
+    parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--create-database", action="store_true")
     parser.add_argument("--expose-postgres", action="store_true",
                         help="当已有容器未映射端口时，添加仅本机可用的 TCP 代理")
-    parser.add_argument("--postgres-container", default="cook-rag-postgres")
+    parser.add_argument("--postgres-container", default="")
     parser.add_argument("--postgres-port", type=int,
                         help="覆盖 PostgreSQL 主机端口，例如 Windows 保留 5432 时使用 15432")
     args = parser.parse_args()
+    if (args.create_database or args.expose_postgres) and not args.postgres_container:
+        parser.error("--postgres-container is required for container operations")
     if not args.source.is_file():
-        raise SystemExit("找不到来源配置；请通过 --source 指定 cook_rag .env")
+        raise SystemExit("找不到来源配置；请通过 --source 指定来源 .env")
     target = ROOT / ".env"
     if target.exists():
         raise SystemExit("目标 .env 已存在，为避免覆盖请先手动备份或编辑")
@@ -132,7 +134,7 @@ def main():
         settings["RAG_DATABASE_URL"] = original.set(drivername="postgresql+psycopg", database=database_name,
             query={**original.query, "connect_timeout": "10"}).render_as_string(hide_password=False)
     with target.open("x", encoding="utf-8") as output:
-        output.write("# Local cook_rag service profile. Generated; never commit.\n" + "\n".join(
+        output.write("# Local service profile. Generated; never commit.\n" + "\n".join(
             f"{key}='{value.replace(chr(39), chr(92) + chr(39))}'" for key, value in settings.items()) + "\n")
     print("已写入本地 .env；已复用来源模型配置；独立数据库 rag_knowledge_assistant、Redis DB6、Qdrant rag_assistant_*。未输出密钥。")
 

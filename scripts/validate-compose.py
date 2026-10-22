@@ -12,7 +12,7 @@ from dotenv import dotenv_values
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--env-file', type=Path, default=Path('artifacts/compose-acceptance.env'))
-    parser.add_argument('--output', type=Path, default=Path('docs/artifacts/enterprise-compose.json'))
+    parser.add_argument('--output', type=Path, default=Path('artifacts/compose-validation.json'))
     args = parser.parse_args()
     settings = dotenv_values(args.env_file)
     api = 'http://127.0.0.1:' + settings.get('RAG_API_PORT', '18010') + '/api/'

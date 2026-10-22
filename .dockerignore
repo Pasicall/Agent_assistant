@@ -9,3 +9,8 @@
 **/data
 artifacts
 docs
+.conda-env
+.venv
+venv
+AGENT.md
+personal-learning-assistant-plan.md

@@ -35,7 +35,7 @@ from app.schemas import (
     RegisterRequest,
 )
 from app.security import hash_password, issue_token, verify_password
-from app.services.access import allowed_kbs, require_kb
+from app.services.access import allowed_kbs, citations_available, require_kb
 from app.services.admission import consume
 from app.worker import notify_job
 
@@ -92,11 +92,10 @@ def evaluation_payload(run, db=None, user=None):
         accessible = set(db.scalars(select(KnowledgeBase.id).where(allowed_kbs(user.id))).all())
         references = [c for row in (run.results or []) for c in row.get("citations", [])]
         references += [c for case in (run.cases or []) for c in case.get("recorded_citations", [])]
-        restricted = bool(set(run.knowledge_base_ids or []) - accessible) or any(
-            c.get("knowledge_base_id") not in accessible for c in references)
+        restricted = bool(set(run.knowledge_base_ids or []) - accessible) or not citations_available(db, user.id, references)
     if restricted:
         return {"id": run.id, "name": run.name, "status": "restricted", "metrics": {}, "results": [],
-            "cases": [], "knowledge_base_ids": [], "created_at": run.created_at, "error": "来源知识库的访问权限已撤销"}
+            "cases": [], "knowledge_base_ids": [], "created_at": run.created_at, "error": "来源文档已删除或知识库不再可访问"}
     return {"id": run.id, "name": run.name, "status": run.status, "metrics": run.metrics,
             "results": run.results, "created_at": run.created_at, "error": run.error,
             "cases": run.cases, "knowledge_base_ids": run.knowledge_base_ids}
@@ -442,12 +441,11 @@ def conversation_detail(conversation_id: str, db: DB, user: CurrentUser):
     item = own_conversation(db, user, conversation_id)
     messages = db.scalars(select(Message).where(Message.conversation_id == item.id)
                           .order_by(Message.created_at, Message.id)).all()
-    accessible = set(db.scalars(select(KnowledgeBase.id).where(allowed_kbs(user.id))).all())
     payloads = []
     for message in messages:
-        restricted = any(c.get("knowledge_base_id") not in accessible for c in (message.citations or []))
+        restricted = not citations_available(db, user.id, message.citations)
         payloads.append({"id": message.id, "role": message.role,
-            "content": "此回答涉及已撤销访问权限的知识库，内容已隐藏。" if restricted else message.content,
+            "content": "此回答的来源已删除或不再可访问，内容已隐藏。" if restricted else message.content,
             "citations": [] if restricted else message.citations,
             "trace": [] if restricted else message.trace, "created_at": message.created_at,
             "run_metadata": {} if restricted else message.run_metadata})
@@ -484,9 +482,8 @@ def create_evaluation(body: EvaluationRequest, request: Request, db: DB, user: C
                 Message.id == case["message_id"], Message.role == "assistant", Conversation.user_id == user.id))
             if recorded is None:
                 raise HTTPException(404, "历史答案不存在或无权访问")
-            accessible = set(db.scalars(select(KnowledgeBase.id).where(allowed_kbs(user.id))).all())
-            if any(c.get("knowledge_base_id") not in accessible for c in (recorded.citations or [])):
-                raise HTTPException(403, "历史答案的来源知识库权限已撤销")
+            if not citations_available(db, user.id, recorded.citations):
+                raise HTTPException(403, "历史答案的来源已删除或不再可访问")
             question_message = db.scalar(select(Message).where(Message.conversation_id == recorded.conversation_id,
                 Message.role == "user", Message.created_at <= recorded.created_at)
                 .order_by(Message.created_at.desc(), Message.id.desc()).limit(1))

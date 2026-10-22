@@ -1,39 +1,31 @@
-import threading
+import json
+from datetime import timedelta
 
-from test_api import create_kb, register, upload
-
-
-def blocked_parser(monkeypatch):
-    from app.services import parsing
-    entered, resume = threading.Event(), threading.Event()
-    real = parsing.parse_document
-    def block(path, filename, **kwargs):
-        entered.set()
-        assert resume.wait(10)
-        return real(path, filename, **kwargs)
-    monkeypatch.setattr(parsing,"parse_document",block)
-    return entered, resume
+from app.models import utcnow
+from sqlalchemy import update
+from test_api import create_kb, register, upload, wait_job
 
 
-def test_delete_while_parser_is_running_returns_before_parse_completes(client, monkeypatch):
-    owner=register(client)
-    kb=create_kb(client,owner)
-    entered,resume=blocked_parser(monkeypatch)
-    try:
-        result=upload(client,owner,kb)
-        assert entered.wait(5)
-        assert client.delete("/api/documents/"+result["document"]["id"],headers=owner).status_code==204
-        assert client.get("/api/jobs/"+result["job_id"],headers=owner).status_code==404
-        assert not client.get("/api/documents",headers=owner).json()
-    finally:
-        resume.set()
+def test_storage_and_pending_task_quotas(client, monkeypatch):
+    owner = register(client)
+    kb = create_kb(client, owner)
+    result = upload(client, owner, kb)
+    wait_job(client, owner, result['job_id'])
+    monkeypatch.setattr(client.app.state.settings, 'user_storage_mb', 1)
+    from app.models import DocumentRevision
+    with client.app.state.database.session() as db:
+        db.execute(update(DocumentRevision).values(size_bytes=1024 * 1024))
+        db.commit()
+    response = client.post('/api/documents/upload', headers=owner, data={'knowledge_base_id': kb},
+                           files={'file': ('second.txt', b'new content')})
+    assert response.status_code == 429
+    assert len(client.get('/api/documents', headers=owner).json()) == 1
+
 
 
 def test_static_limits_apply_to_upload_reindex_restore_chat_and_evaluation(client, monkeypatch):
-    import json
-    from datetime import timedelta
 
-    from app.models import DocumentRevision, IngestionJob, utcnow
+    from app.models import DocumentRevision, IngestionJob
     from sqlalchemy import text, update
     from test_api import wait_evaluation, wait_job
 

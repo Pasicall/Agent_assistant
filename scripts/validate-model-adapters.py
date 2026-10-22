@@ -1,6 +1,6 @@
 """Run real, small model adapter checks without touching application data or credentials.
 
-Run from any directory with the cook-rag-1 Python interpreter. The default tries
+Run from any directory with the project Python interpreter. The default tries
 Hugging Face's existing cache only; --allow-download permits normal model retrieval.
 It writes a sanitized JSON report and an ignored, synthetic image fixture.
 """
@@ -19,8 +19,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BACKEND = ROOT / "backend"
-REPORT = ROOT / "docs" / "artifacts" / "model-adapters-2026-10-16.json"
-FIXTURE = ROOT / "artifacts" / "model-adapters-2026-10-16" / "vision-policy.png"
+REPORT = ROOT / "artifacts" / "model-adapters.json"
+FIXTURE = ROOT / "artifacts" / "model-adapters" / "vision-policy.png"
 CROSS_ENCODER = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
 FIXTURE_LINES = ["Travel policy", "Hotel limit: CNY 500", "Submit within 30 days"]
 
@@ -137,23 +137,23 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--allow-download", action="store_true")
     parser.add_argument("--only", choices=("all", "cross-encoder", "vision"), default="all")
+    parser.add_argument("--report", type=Path, default=REPORT)
     args = parser.parse_args()
+    global_report = args.report.resolve()
     sys.path.insert(0, str(BACKEND))
     os.chdir(BACKEND)
     report = {}
-    if REPORT.is_file():
-        report = json.loads(REPORT.read_text(encoding="utf-8"))
     report.update({
         "checked_at": datetime.now(timezone(timedelta(hours=8))).isoformat(timespec="seconds"),
         "timezone": "Asia/Shanghai",
-        "environment": "cook-rag-1",
+        "python_prefix": sys.prefix,
         "python_version": sys.version.split()[0],
         "packages": {name: package_version(name) for name in
                      ("sentence-transformers", "torch", "transformers", "langchain-ollama", "Pillow")},
         "credentials_or_connection_strings_recorded": False,
         "limitations": [
             "These are real adapter smoke tests, not quality, latency, or cost-improvement benchmarks.",
-            "No API upload, production data, code_c8 files, or application service source is modified.",
+            "No API upload, production data or application service source is modified.",
             "The synthetic PNG is under ignored artifacts/; this JSON is the reproducible evidence record.",
         ],
     })
@@ -166,8 +166,8 @@ def main() -> int:
         except Exception as exc:
             report[name] = {"status": "unavailable", **safe_error(exc),
                             "duration_seconds": round(time.perf_counter() - began, 3)}
-        REPORT.parent.mkdir(parents=True, exist_ok=True)
-        REPORT.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        global_report.parent.mkdir(parents=True, exist_ok=True)
+        global_report.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(json.dumps({"check": name, "status": report[name]["status"],
                           "duration_seconds": report[name]["duration_seconds"]}, ensure_ascii=False), flush=True)
     return 0 if all(report[name]["status"] == "passed" for name in selected) else 1

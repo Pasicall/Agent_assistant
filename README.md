@@ -2,11 +2,11 @@
 
 # 知衡 · Knowledge OS
 
-### 面向私有文档的智能知识检索与问答平台
+### 面向个人学习资料的知识检索与引用问答
 
 连接分散的知识，让每一个答案有据可循。
 
-[![CI](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/workflows/ci.yml)
+[![CI](https://github.com/Pasicall/Agent_assistant/actions/workflows/ci.yml/badge.svg)](https://github.com/Pasicall/Agent_assistant/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white)
 ![Vue](https://img.shields.io/badge/Vue-3-4FC08D?logo=vuedotjs&logoColor=white)
@@ -20,7 +20,7 @@
 ![Ollama](https://img.shields.io/badge/Ollama-222222?logo=ollama&logoColor=white)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-[项目简介](#项目简介) · [产品预览](#产品预览) · [核心能力](#核心能力) · [系统架构](#系统架构) · [快速开始](#快速开始) · [模型接入](#模型接入) · [团队治理](docs/enterprise.md) · [文档](#文档)
+[项目简介](#项目简介) · [使用流程](#使用流程) · [核心能力](#核心能力) · [系统架构](#系统架构) · [快速开始](#快速开始) · [模型接入](#模型接入) · [文档](#文档)
 
 </div>
 
@@ -28,9 +28,9 @@
 
 ## 项目简介
 
-**知衡（Knowledge OS）** 是一套面向企业知识管理与个人知识沉淀的 RAG 应用，将文档管理、多模态解析、混合检索、引用问答与质量评测整合到统一工作台。
+**知衡（Knowledge OS）** 是一套面向个人教材、课件 PDF、技术文档和学习笔记的 RAG 应用，将文档管理、多模态解析、混合检索、引用问答与质量评测整合到统一工作台。
 
-从产品手册、业务制度到研究资料，知衡将原始文档转化为可检索的知识单元，结合大语言模型生成带有原文依据的回答。用户可以沿着引用回到文档与页码，通过检索轨迹了解证据如何被找到，并将历史答案纳入持续评测。
+从教材、技术手册到研究资料，知衡将原始文档转化为可检索的知识单元，结合大语言模型生成带有原文依据的回答。用户可以沿着引用回到文档与页码，通过检索轨迹了解证据如何被找到，并将历史答案纳入持续评测。
 
 > **知识管理 → 证据检索 → 引用问答 → 质量评测**，形成可追溯、可迭代的知识应用闭环。
 
@@ -38,49 +38,24 @@
 
 | 场景 | 使用方式 |
 | --- | --- |
-| 企业制度与业务知识 | 汇集制度、流程与操作规范，按问题定位条款及来源 |
+| 个人学习资料 | 汇集教材、课件与笔记，按问题查找定义及来源 |
 | 产品与技术支持 | 将产品说明、使用手册和技术文档组织为可查询的知识库 |
 | 研究与资料整理 | 跨文档检索关键信息，保留文献片段和页码依据 |
 | RAG 应用开发 | 对比检索策略、检查 Agent 轨迹、复评历史答案与模型效果 |
 
-## 产品预览
+## 使用流程
 
-### 知识空间
+创建个人知识库 → 上传资料 → 解析与索引 → 检索 / 引用问答 → 查看来源与历史。
 
-按主题组织知识库，统一管理文档、解析状态与检索分块。
+工作台保留知识空间、智能问答、评测中心和系统与模型页面。每个账号只能访问自己的个人知识库；已有普通邮箱密码登录继续使用。
 
-![知衡知识空间与文档管理](docs/images/knowledge-workspace.jpg)
-
-### 引用问答
-
-结合私有文档生成回答，在同一页面查看来源编号、原文片段与页码。
-
-![知衡引用问答与参考证据](docs/images/cited-chat.jpg)
-
-### 质量评测
-
-将历史答案加入评测，结合参考答案与期望文档查看检索指标和 Ragas 结果。
-
-![知衡历史答案复评与质量指标](docs/images/evaluation-center.jpg)
-
-<details>
-<summary>查看团队治理与文档版本管理</summary>
-
-![组织成员、知识库单独授权与操作审计](docs/images/governance-workspace.jpg)
-
-![文档版本、历史恢复与有效期](docs/images/document-versions.jpg)
-
-![平台管理员调整配额与管理任务](docs/images/platform-controls.jpg)
-
-</details>
-
-*截图使用演示账号与合成示例资料，展示实际运行界面。*
+![个人版引用问答（本轮截图，仓库架构文档与离线摘录模式）](docs/images/personal-chat.png)
 
 ## 核心能力
 
 ### 📚 统一知识空间
 
-支持个人知识空间与团队知识库，提供管理员、编辑、只读角色，以及组织全员或指定成员可见范围。在同一界面完成文档上传、任务跟踪、内容预览与原文管理。支持单文件 **50 MiB** 上传、SHA256 去重、失败重试与重新索引。
+知识库归创建者所有，其他账号不能查看、修改或检索其中的资料。在同一界面完成文档上传、任务跟踪、内容预览与原文管理。支持单文件 **50 MiB** 上传、SHA256 去重、失败重试与重新索引。
 
 摄取任务异步完成文档解析、文本分块、Embedding 与向量索引，任务状态持久化，支持租约恢复与退避重试。文档更新生成新版本，旧版持续服务，新索引就绪后切换；支持历史版本恢复、有效期和目录增量同步。
 
@@ -88,7 +63,7 @@
 
 结合 **Qdrant Dense Retrieval** 与持久化中文 **BM25 倒排索引**，兼顾语义表达和关键词命中，通过 **RRF** 融合候选排名，并支持使用 **Cross-Encoder** 进一步精排。
 
-检索范围在查询前根据组织成员、知识库授权与活动版本确定，仅回查命中的候选正文。问答、向量召回、词项检索和历史来源遵循一致的数据访问范围。
+检索范围在查询前根据当前账号的所有权、活动版本与有效期确定，仅回查命中的候选正文。问答、向量召回、词项检索和历史来源遵循一致的数据访问范围。
 
 ### 💬 带有依据的知识问答
 
@@ -110,13 +85,13 @@
 
 评测通过独立 Worker 异步运行，前端自动更新状态。历史答案可直接加入评测，复用当时的答案和证据。答案缓存与评审缓存分别管理，减少相同内容的重复生成和评分。
 
-### 🛡️ 团队治理与运行保障
+### 🛡️ 账户与运行保障
 
-通过可撤销服务端会话、HttpOnly Cookie、OIDC 单点登录、角色授权与操作审计管理访问。登录与问答限流、账户和服务并发上限、存储与请求预算，共同约束资源使用。
+保留邮箱密码登录、可撤销服务端会话、HttpOnly Cookie 和防跨站检查。登录与问答限流、账户和服务并发、存储与每日模型请求预算通过服务端静态配置设置，修改后重启相关服务生效。
 
-平台管理员可在前端保存全局或指定账号配额，新请求即时读取；任务管理支持查看摄取、评测与清理进度，以及取消、重试和故障恢复。PDF 优先读取文字层，并显示逐页解析和向量生成阶段。
+文档列表展示自己的摄取任务与逐页进度，支持失败重试和重新索引；Worker 保留租约恢复与持久清理。来源目录配置后，可在知识空间折叠面板增量同步；账号区域支持退出所有登录设备。
 
-删除操作提交持久清理任务，在向量服务恢复后继续重试；Alembic 负责数据库升级，协调备份覆盖数据库、原件与向量快照，并提供完整性校验和空目标恢复保护。健康探针、Prometheus 指标与示例告警规则用于运行诊断。配置方式见[团队治理与可靠性](docs/enterprise.md)。
+Alembic 负责数据库升级，协调备份覆盖数据库、原件与向量数据，并提供完整性校验和空目标恢复保护。健康探针、受保护的 Prometheus 指标与普通运行日志用于诊断。配置与旧数据兼容说明见[部署指南](docs/deployment.md)。
 
 ### 🏠 灵活的私有化部署
 
@@ -166,8 +141,8 @@ flowchart LR
 准备 Docker 与 Compose，克隆仓库并创建部署配置：
 
 ```bash
-git clone https://github.com/leonbuilds-ai/rag-knowledge-assistant.git
-cd rag-knowledge-assistant
+git clone https://github.com/Pasicall/Agent_assistant.git
+cd Agent_assistant
 cp .env.production.example .env.docker
 ```
 
@@ -189,12 +164,11 @@ docker compose --env-file .env.docker up --build -d
 环境要求：**Python 3.12、Node.js 20.19+**，以及可用的模型服务。
 
 ```bash
-git clone https://github.com/leonbuilds-ai/rag-knowledge-assistant.git
-cd rag-knowledge-assistant
+git clone https://github.com/Pasicall/Agent_assistant.git
+cd Agent_assistant
 
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install -e "./backend[dev,ml,evaluation]"
+conda env create --prefix ./.conda-env --file environment.yml
+conda activate ./.conda-env
 
 cd frontend
 npm ci
@@ -202,7 +176,7 @@ cd ..
 cp .env.ollama.example .env
 ```
 
-Windows 可使用 `.venv\Scripts\Activate.ps1` 激活环境，也可使用已有 conda 环境。配置文件提供 Ollama 模型示例；准备模型后，在两个终端分别启动：
+环境定义包含 Python 3.12、Node.js 22 及开发、模型适配和评测依赖。也可使用部署指南中的 venv 方式。配置文件提供 Ollama 模型示例；准备模型后，在两个终端分别启动：
 
 ```bash
 # 终端一：API
@@ -235,8 +209,8 @@ Ollama 示例模型为 `qwen3.5:9b` 与 `qwen3-embedding:8b`。视觉模型通�
 
 ## 开始使用
 
-1. **建立知识空间**：注册账户，按业务或主题创建知识库。
-2. **导入文档**：上传手册、制度或研究资料，等待解析与索引完成。
+1. **建立知识空间**：注册账户，按课程或主题创建知识库。
+2. **导入文档**：上传教材、技术文档或学习笔记，等待解析与索引完成。
 3. **提问并查看证据**：选择知识库与问答模式，结合原文引用核对答案。
 4. **持续评测**：将答案加入评测集，填写参考答案与期望文档，对比检索策略与模型结果。
 
@@ -253,7 +227,7 @@ Ollama 示例模型为 `qwen3.5:9b` 与 `qwen3-embedding:8b`。视觉模型通�
 | 模型链路验证 | `python scripts/smoke.py` |
 | Ragas 评测验证 | `python scripts/smoke.py --with-ragas` |
 
-GitHub Actions 覆盖后端测试、真实 PostgreSQL/Redis/Qdrant 集成回归、合成业务门槛与前端构建；模型与容器验证记录见 [评测与验证](docs/validation.md)。
+GitHub Actions 覆盖后端测试、真实 PostgreSQL/Redis/Qdrant 集成回归、合成业务门槛与前端构建；模型与本轮验证范围见 [评测与验证](docs/validation.md)。
 
 ## 项目结构
 

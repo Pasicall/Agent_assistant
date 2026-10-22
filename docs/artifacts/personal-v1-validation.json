@@ -1,0 +1,104 @@
+{
+  "date": "2026-10-22",
+  "scope": "personal-learning-assistant-plan stages 4-5",
+  "status": "functional-validation-passed-semantic-comparison-stopped-by-user",
+  "backend_tests": {
+    "passed": 94,
+    "failures": 0
+  },
+  "ruff": "passed",
+  "frontend_build": "passed",
+  "pip_check": "passed",
+  "migration_head": "006_operations",
+  "original_test_functions_retained": 64,
+  "new_test_functions": 6,
+  "business_benchmark": {
+    "cases": 30,
+    "hit_at_5": 0.8846153846153846,
+    "recall_at_5": 0.8846153846153846,
+    "abstention_rate_on_unanswerable": 1,
+    "functional_gate_passed": true,
+    "capacity_probe": {
+      "chunks": 5000,
+      "queries": 40,
+      "strategy": "SQL persistent BM25 only",
+      "top1_hits": 40,
+      "p50_ms": 16.27,
+      "p95_ms": 18.69,
+      "note": "Synthetic single-process retrieval probe; excludes embedding, reranking, LLM and network latency."
+    }
+  },
+  "repository_document_demo": {
+    "upload_and_dedup": true,
+    "original_download": true,
+    "standard_and_agent": true,
+    "citation_downloads": true,
+    "model_calls": false,
+    "history_evaluation": true,
+    "dense_hybrid_comparison": true,
+    "stream": true,
+    "replacement": true,
+    "historical_restore": true,
+    "deletion": true,
+    "deleted_history_hidden": true,
+    "cleanup_completed": true
+  },
+  "browser": {
+    "requests": 38,
+    "requests_to_removed_routes": [],
+    "unexpected_errors": [],
+    "checks": [
+      "registration",
+      "personal KB form",
+      "repository document sync",
+      "refresh session restore",
+      "two KB switching",
+      "cited answer",
+      "logout",
+      "password re-login"
+    ],
+    "servers_stopped": true
+  },
+  "real_model_validation": {
+    "status": "stopped-by-user",
+    "temporary_model_server_stopped": true,
+    "models_downloaded": false,
+    "baseline_completed_answers": 6,
+    "baseline_generated_answers_passing_numeric_verification": 0,
+    "baseline_extractive_fallback_answers": 6,
+    "after_completed_questions": 1,
+    "before_after_comparison_completed": false,
+    "real_ragas_scoring_executed": false
+  },
+  "limitations": [
+    "Real semantic before/after comparison stopped at user request; generated-answer quality not accepted",
+    "Real Ragas scoring and configured CrossEncoder weights were not exercised",
+    "No local Docker/PostgreSQL/Redis/Qdrant-server integration run; CI retained",
+    "PowerShell scripts statically checked only",
+    "RRF formula-constant question abstained in demo; retrieval strategy unchanged"
+  ],
+  "offline_before_after_comparison": {
+    "baseline": "stage 3 commit 2b94fec",
+    "materials": [
+      "docs/architecture.md",
+      "docs/deployment.md"
+    ],
+    "questions": 3,
+    "chunks": 31,
+    "mode": "demo",
+    "model_calls": 0,
+    "identical_extractive_answers": true,
+    "passed": true,
+    "identical_ranked_evidence": true,
+    "resource_ids_preserved": true,
+    "answer_facts_and_sources_valid": true,
+    "max_dense_score_delta": 1.48731406635072e-08,
+    "dense_score_absolute_tolerance": 1e-06
+  },
+  "removed_routes": {
+    "method_path_pairs": 21,
+    "anonymous_status": 404,
+    "authenticated_status": 404,
+    "openapi_checked": true
+  }
+}

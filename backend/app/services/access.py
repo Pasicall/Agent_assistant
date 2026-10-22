@@ -2,7 +2,7 @@
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from app.models import KnowledgeBase
+from app.models import Document, KnowledgeBase
 
 
 def allowed_kbs(user_id):
@@ -15,3 +15,14 @@ def require_kb(db, user, kb_id):
     if kb is None:
         raise HTTPException(404, "知识库不存在")
     return kb
+
+
+def citations_available(db, user_id, citations):
+    """Saved versions remain readable while their document exists in the personal scope."""
+    if not citations:
+        return True
+    references = {(row.get("document_id"), row.get("knowledge_base_id")) for row in citations}
+    available = set(db.execute(select(Document.id, Document.knowledge_base_id).join(KnowledgeBase).where(
+        allowed_kbs(user_id), Document.status != "deleting",
+        Document.id.in_([document_id for document_id, _ in references]))).all())
+    return references <= available

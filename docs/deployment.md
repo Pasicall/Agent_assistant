@@ -81,6 +81,17 @@ docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.ol
 
 根目录 `.env.example` 提供无需外部数据库和模型服务的开发默认配置：SQLite、Qdrant local、确定性哈希向量和原文摘录回答。哈希向量用于验证检索流程，不具备语义模型的理解能力；原文摘录模式也不等同于大模型生成。
 
+### Conda（推荐本项目本机开发）
+
+```bash
+conda env create --prefix ./.conda-env --file environment.yml
+conda activate ./.conda-env
+cd frontend
+npm ci
+```
+
+从仓库根目录执行环境创建。已建好环境只需激活，无需重复安装。`.conda-env`、业务数据、真实配置和验收临时文件均不提交 Git。
+
 ### Linux / macOS：venv
 
 ```bash
@@ -310,8 +321,33 @@ docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.mo
 
 模型探针只检查 API 连通与模型列表，不执行付费生成；部分兼容服务不提供 `/models`，此时需要结合实际推理验证。HTTP 指标统计到响应头的耗时，完整生成时延查看 RAG 阶段指标及消息运行元数据。
 
-### 组织、登录与文档源
+### 普通登录、静态限制与文档源
 
-组织角色、知识库单独授权、OIDC 参数、会话撤销、配额与目录同步的配置见[团队治理与可靠性](enterprise.md)。HTTPS 入口配置实际的 `RAG_PUBLIC_BASE_URL`、`RAG_CORS_ORIGINS` 和 `RAG_COOKIE_SECURE=true`，反向代理仅信任受控网关。
+保留邮箱密码注册、登录和会话撤销。创建所需账号后可设置 `RAG_ALLOW_REGISTRATION=false`，已有密码登录继续可用；账号区域可退出所有设备。HTTPS 入口配置实际的 `RAG_PUBLIC_BASE_URL`、`RAG_CORS_ORIGINS` 与 `RAG_COOKIE_SECURE=true`。
+
+资源限制通过服务端配置：
+
+| 设置 | 默认值 | 用途 |
+| --- | --- | --- |
+| `RAG_MAX_UPLOAD_MB` | 50 | 单文件大小上限 |
+| `RAG_USER_STORAGE_MB` | 1024 | 每个所有者的存储容量 |
+| `RAG_MAX_PENDING_JOBS` | 20 | 待处理摄取任务上限 |
+| `RAG_AUTH_RATE_PER_MINUTE` | 20 | 登录/注册速率 |
+| `RAG_CHAT_RATE_PER_MINUTE` | 30 | 问答速率 |
+| `RAG_MAX_ACTIVE_CHATS` | 2 | 每账号同时问答数 |
+| `RAG_GLOBAL_ACTIVE_CHATS` | 4 | 服务同时问答数 |
+| `RAG_USER_DAILY_MODEL_REQUESTS` | 500 | 模型调用预算；问答 1、Ragas 案例 6，非精确 token 账单 |
+
+修改 `.env` 或部署配置后重启 API 与 Worker。没有在线动态配额或管理员任务入口；原有自己的文档重试、后台恢复和清理仍可用。
+
+设置 `RAG_SOURCE_SYNC_ROOT=/absolute/path/to/materials` 后，知识空间显示可折叠的“同步文档源”。选择个人知识库和根目录内相对路径执行增量导入，每次最多 100 份支持的文件；越界路径和符号链接会被拒绝。源文件移除时保留版本，需显式过期或删除。容器部署在共用环境中透传该设置，并将根目录只读挂载给 API，例如 `./materials:/materials:ro` 和 `RAG_SOURCE_SYNC_ROOT=/materials`。
+
+### 从旧版升级
+
+升级前停稳全部 API/Worker，按前述步骤保存数据库、原文件与向量的协调备份并验证。个人库、文档、版本、分块和会话 ID 保持，未改变模型及分块配置时无需全量重新索引。Alembic head 仍为 `006_operations`，不要通过重建数据库或 `create_all()` 升级。
+
+冻结迁移保留旧组织、成员授权、审计、OIDC、动态策略表及知识库兼容列。运行代码不再读写这些业务，非空 `organization_id` 的资料停止出现在个人范围内，但不会被自动转移或删除。升级前应清点这类资料、关联文档和历史引用，在副本中验证后再切换。
+
+旧 OIDC 账户不保证具有可用的普通密码；应先确认恢复登录方式，不能自动设置默认密码。旧全局/账户动态配额不再生效：先列出与静态配置的差异，把仍需保留的全局限制写入部署配置；本版不提供差异化账户策略。需要转移旧组织资料或处理旧身份时，另行制定明确的所有者映射和数据迁移步骤。
 
 当前 Compose 为单实例存储部署。多个 API/Worker 主机需要共享原件存储、数据库/向量副本和模型容量规划，并在目标环境验证故障切换。

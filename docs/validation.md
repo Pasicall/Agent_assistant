@@ -1,127 +1,69 @@
-# 评测与验证
+# 个人知识库第一版：整改与验证
 
-本文记录自动化检查、模型链路和容器验证结果，便于复现、排查问题及比较后续版本。记录日期：2026年10月15日至16日。
+验证日期：2026-10-22（Asia/Shanghai）。本轮承接阶段 0–3，完成阶段 4 的模型、配置、测试及文档整理，并按阶段 5 验证个人资料链路。当前结果不引用旧版企业功能验收作为通过依据。
 
-## 自动化检查
+## 实际变更
 
-| 检查项 | 结果 | 覆盖内容 |
-| --- | --- | --- |
-| 后端测试 | 20项通过 | 账户权限、上传、任务恢复、检索、引用与历史复评 |
-| 静态检查 | 通过 | Ruff |
-| 前端检查 | 通过 | TypeScript类型检查与Vite构建 |
-| 持续集成 | 通过 | Linux环境的后端测试与前端构建 |
+- 删除 Membership、KnowledgeBaseGrant、AuditEvent、OIDCIdentity、OIDCFlow、OperationalPolicy 的运行 ORM 定义。Organization 仅保留外键所需的 id；知识库兼容列保留并注释用途。
+- 保留全部冻结历史迁移，Alembic head 仍为 `006_operations`。旧表与数据不删除，不自动变更组织资料归属或旧登录方式。
+- 清除 Compose、生产配置样例的 OIDC 和平台管理员字段。生产模式、普通认证、静态限制、Worker 与存储适配保持。
+- 按认证、文档版本、清理、静态限制、并发、流式、诊断、来源同步、迁移等职责迁移原混合测试。阶段 3 的 64 个测试函数全部保留；参数化展开后从 88 项增加到 94 项。
+- README、架构、设计与部署说明改为个人资料定位。旧截图和 2026-10-15 至 18 日的企业说明、验证记录移动到 `docs/history/`，标注为历史资料；原始图片和 JSON 保持内容不变。
+- 初始化脚本默认使用仓库内 `.conda-env`，仍允许显式指定环境。校验脚本不再使用过期的固定输出日期或覆盖旧版验收记录；Docker 构建上下文排除本机 Conda、私密配置和验收产物。
 
-持续集成记录：[GitHub Actions](https://github.com/leonbuilds-ai/rag-knowledge-assistant/actions/runs/38844819562)。
+## 回归中修复的边界
 
-测试覆盖50MiB上传边界、SHA256去重、路径校验、过期token、租约恢复、向量清理、权限范围过滤、单文档BM25、PDF空白页、DOCX表格、统一精排、上下文预算及缓存失效。
+删除单份文档时，原实现只检查其知识库是否仍属于当前账号，因此旧会话与历史复评可能再次使用该文档的已保存证据。新增失败用例复现后，统一检查保存引用的文档是否仍存在且属于当前个人范围，覆盖历史展示、后续对话上下文、评测结果、创建复评及排队评测执行。
+
+仍存在且归当前用户所有的文档，其历史版本可继续下载和恢复；不把非活动版本一律认定为越权。检索算法、提示词、切块、向量模型适配和引用/数值核验策略未修改。Worker 只调整了历史复评的来源检查。
+
+## 自动化与资料流程
+
+| 检查 | 实际结果 |
+| --- | --- |
+| 后端全量 Pytest | 94 passed |
+| Ruff | 通过 |
+| 前端 TypeScript / Vite | 通过 |
+| pip check | 无依赖冲突 |
+| 30 问合成基准 | Hit@5、Recall@5 均为 0.8846153846；4 条不可回答问题全部拒答；与阶段 0、3 的逐题结果一致（排除耗时） |
+| 5000 分块持久 BM25 | 40/40 首位命中 |
+| 仓库真实文档，离线模式 | architecture.md 与 deployment.md 入库、去重、标准/Agent 问答、版本原件、历史复评、Dense/Hybrid 对照、SSE、design.md 替换、恢复原版本、删除及持久清理通过 |
+| 阶段 3 / 修改后离线对照 | 同一备份恢复、同一配置、31 个分块、3 道问题：Dense/BM25/Hybrid 的片段、ID、排序一致，六次摘录答案一致；向量得分最大浮点差 1.49×10⁻⁸，低于 10⁻⁶ 容差 |
+| 浏览器 | 注册、仅名称/描述的新建表单、实际文档同步、刷新恢复登录、两个个人库切换、带来源问答、退出及密码重新登录通过；请求审查未发现已删除接口 |
+| 已删除模块 | 21 组旧方法/路径在匿名、登录两种状态均返回 404；OpenAPI 无企业、平台、OIDC 路由与旧请求结构 |
+| 数据兼容 | 全新数据库、旧 v1 数据升级、协调备份恢复、兼容表存在且不进入运行元数据、最小外键解析通过 |
+| 认证与资源保护 | 跨用户隔离、会话撤销、防跨站、限流、存储/待处理任务、并发、每日预算、幂等、停止生成与长调用后撤销检查通过 |
+
+`docs/artifacts/personal-v1-validation.json` 是本轮精简汇总。原始日志、XML、完整语料/引用与比较结果保存在忽略提交的 `artifacts/phase4-5/`。本轮网页截图为 README 中的个人版截图，使用隔离验收账号与仓库架构文档。
+
+## 真实模型对照：按用户要求停止
+
+已停止本地模型验收，并关闭本轮临时启动的 Ollama 服务。未下载新权重，未改动日常 `.env`，后续检查不调用模型。
+
+停止前，阶段 3 基线使用已有 `qwen3:4b` 与 `qwen3-embedding:0.6b`（实际 1024 维）完成了三道问题的标准/Agent 共六次问答。六次生成均未通过现有数值核验，最终返回原文摘录；摘录中的关键事实与引用下载有效。这只能证明模型适配及回退链路可运行，不能作为生成答案质量通过的依据。
+
+修改后的真实模型运行在完成第一道问题后中断，未形成完整前后对照。真实语义检索与生成质量验收保留为未完成；未执行真实 Ragas 评分。下方离线检查仅用于验证工程流程和固定配置下的行为一致性。
+
+## 可复现检查
+
+从仓库根目录执行：
 
 ```bash
+conda activate ./.conda-env
 python -m ruff check backend scripts
-cd backend
-python -m pytest -q
-cd ../frontend
+python -m pytest -q backend/tests
+python scripts/benchmark.py --load-chunks 5000 --queries 40 --output artifacts/benchmark.json
+python scripts/validate-personal.py --lifecycle --output artifacts/personal-validation.json
+cd frontend
 npm run build
 ```
 
-## 端到端模型链路
+`validate-personal.py` 每次新建隔离 SQLite / Qdrant local，默认使用真实仓库文档和明确标注的 hash/摘录模式。可用 `--mode configured` 读取已选模型；`--snapshot` 先停稳 Worker 和关闭向量客户端再做协调备份，`--restore` 仅写入新的空目标，`--compare` 校验 ID、排序、证据和关键事实。`--with-ragas` 在资料流程中执行可选真实模型评分。CI 新增离线实际文档流程，外部服务任务继续覆盖 PostgreSQL、Redis、Qdrant server。
 
-验证组合为 **PostgreSQL + Redis + Qdrant + Ollama**，生成模型使用 `qwen3.5:9b`，Embedding使用 `qwen3-embedding:8b`。
+## 验证边界
 
-| 验证项 | 结果 |
-| --- | --- |
-| 异步文档摄取 | 两份示例文档完成解析与索引 |
-| 向量写入 | 4096维非零向量，片段ID与SQL记录一致 |
-| 标准问答 | 返回答案、来源编号与原文片段 |
-| Agent问答 | 检索、证据检查与生成链路完成 |
-| 多轮上下文 | 同一会话内完成连续追问 |
-| 答案缓存 | 重复请求复用答案 |
-| 历史复评 | 使用已保存的问题、答案与引用 |
-| 评分缓存 | 命中已保存的评分，四项结果保持一致 |
+当前没有本机 Docker/PostgreSQL/Redis/Qdrant server 配置，本轮没有运行容器构建、完整 Compose 或真实服务集成；Compose 已做 YAML 与应用字段契约检查，原有 CI 服务集成任务保留。PowerShell 脚本在本机仅做静态核对，未在 Windows 执行。
 
-完整结果：[模型链路记录](artifacts/smoke-2026-10-15.json)、[核心流程记录](artifacts/smoke-2026-10-15-core.json)。
+可选重排保留适配与单次执行的模拟回归，Ragas 保留预检和历史回放等路径回归；本轮未加载真实 CrossEncoder 权重，也未执行真实 Ragas 评分。
 
-## 检索与Ragas样例
-
-以下结果来自仓库内两份示例文档、一条标注案例，Ragas版本为0.3.9。该用例用于检查评测流程，效果比较应结合具体业务评测集进行。
-
-| 检索指标 | Dense | Hybrid |
-| --- | ---: | ---: |
-| Hit@5 | 1.0000 | 1.0000 |
-| Recall@5 | 1.0000 | 1.0000 |
-| MRR@5 | 1.0000 | 1.0000 |
-
-| Ragas指标 | 得分 |
-| --- | ---: |
-| Faithfulness | 0.5000 |
-| Answer relevancy | 0.8742 |
-| Context precision | 约1.0000 |
-| Context recall | 1.0000 |
-
-复用同一历史答案与评审配置时，评分缓存命中1条，新增评审案例为0条。
-
-## 多模态与重排适配
-
-| 适配器 | 验证方式 | 结果 |
-| --- | --- | --- |
-| 多语言CrossEncoder | 对相关/无关语句分别打分 | 0.9565 / -4.6102 |
-| Qwen视觉解析 | 通过正式解析入口处理英文测试图片 | 保留500与30两个关键数值 |
-
-测试图片为黑白英文样例，视觉检查未启用OCR。文档摄取与问答用例、独立重排适配器用例分别记录。完整输出见 [模型适配记录](artifacts/model-adapters-2026-10-16.json)。
-
-## 容器与界面
-
-Docker Compose配置检查及前后端镜像构建通过。后端默认包含`ml,evaluation`依赖，在离线、非root容器中通过以下检查：
-
-- `pip check`无依赖冲突。
-- Ragas、SentenceTransformers与CPU PyTorch导入成功。
-- `/api/health`返回200。
-- Tesseract包含中文与英文语言包。
-
-容器记录见 [Docker验证](artifacts/docker-2026-10-16.json)。验证范围包括镜像构建与独立容器健康检查；完整Compose编排见部署文档。
-
-浏览器检查覆盖注册、知识库创建、批量上传与文档状态显示。后续版本可继续扩展检索评测集、中文扫描文档集和负载测试。
-
-
-## 团队治理与可靠性验收
-
-本轮新增组织角色、受限知识库授权、会话撤销、配额、持久 BM25、版本切换、清理任务、真实 SSE、异步评测、迁移和恢复工具。代码回归覆盖并发准入、会话顺序、幂等重放、跨站请求、登录预算、授权撤销后的历史隐藏、更新中查询、版本恢复、过期缓存、数字核对与 OIDC 协议校验。
-
-业务题集为人工编写的合成语料：8份文档、30条问题，包括26条有答案问题和4条无答案问题。hash/摘录模式验证来源命中、拒答和过期来源过滤；本地 Ollama 另选6条代表案例，包含无答案、恶意文档和跨文档问题。结果仅用于该样例集的回归，不是企业准确率统计。
-
-| 验证 | 实际记录 |
-| --- | --- |
-| 自动化回归 | SQLite 开发环境49项通过；PostgreSQL + Redis + Qdrant环境48项通过、1项SQLite专用恢复用例跳过 |
-| 30条合成业务回归 | 有答案来源 Hit@5 / Recall@5 均为1；4条无答案全部拒答；过期来源未返回 |
-| 5000分块持久 BM25 | 40次查询首位命中40次；P95约60ms，仅统计单进程SQL检索 |
-| 本地 Ollama 6条代表案例 | 5条有答案来源命中；1条无答案拒答；其中2条生成内容经核验回退为原文摘录 |
-| 跨存储恢复演练 | PostgreSQL、文件与Qdrant快照恢复后，登录、检索与原文下载通过 |
-| 完整 Compose | 独立迁移、摄取/评测Worker、前端代理、Cookie登录、问答和监控接口通过 |
-| Prometheus 告警规则 | 官方 promtool 校验通过，共5条规则 |
-| 实际 Ragas 异步闭环 | 四指标返回、历史答案复用与评分缓存回放通过 |
-
-最新 Ragas 单案例为 faithfulness=0.5、answer_relevancy≈0.9451、context_precision≈1、context_recall=1。该结果保留原始评审分歧；同源模型评审与小样本不能替代独立人评或支持总体质量承诺。
-
-完整证据：[业务与容量](artifacts/enterprise-benchmark-demo.json)、[本地模型代表案例](artifacts/enterprise-benchmark-ollama.json)、[真实基础设施与恢复](artifacts/enterprise-infrastructure.json)、[Compose](artifacts/enterprise-compose.json)、[异步模型及Ragas](artifacts/enterprise-smoke-ollama.json)。
-
-```bash
-python scripts/benchmark.py --load-chunks 5000 --queries 40 --output artifacts/benchmark.json
-python scripts/validate-infrastructure.py --postgres-container <本机数据库容器> --output artifacts/infrastructure.json
-python scripts/smoke.py --with-ragas --report artifacts/model-and-ragas.json
-```
-
-基础设施脚本只在当前配置服务上创建有唯一前缀的临时数据库、测试schema及向量命名空间，结束后清理本次资源。它不会在用户知识库内运行故障用例。OIDC测试覆盖签名、nonce、audience、PKCE、一次性state与同邮箱冲突；未配置真实企业身份提供商时，不宣称已完成其端到端接入。
-
-
-## 平台管理与检索修订（2026-10-18）
-
-本轮增加平台管理员全局及账号配额编辑、摄取/评测任务取消与重试、处理中删除确认、逐页解析进度，并调整界面字号和小窗口侧栏。管理员名单由部署配置指定，不能由普通账号或组织角色自行授予。
-
-SQLite回归62项通过；真实PostgreSQL、Redis、Qdrant回归61项通过、1项SQLite专用恢复测试跳过，独立跨存储备份恢复演练通过。覆盖配额即时生效、越权拒绝、处理中取消/删除、同页相邻证据补全、中文分词粒度、代码数组下标与引用编号区分。
-
-30条合成业务题集和5000分块SQL检索探测通过。实际本机知识库另用于人工排查；真实资料与回答仅保留本机，不作为可公开复现的总体准确率样本。文档中没有完整证据的问题保守拒答，Markdown引用的图片未随资料上传时，需要补充相应图片或PDF。
-
-验收记录：[基础设施与恢复](artifacts/platform-infrastructure-2026-10-18.json)、[合成题集与容量](artifacts/platform-benchmark-2026-10-18.json)。
-
-后续问题相关性修订新增4项回归，本地共66项通过，前端构建通过。覆盖数值指标与泛词干扰区分、有来源但不切题的句子拒绝、已核验原句裁剪与复核、最终引用重编号。首页移除无切换逻辑的工作台下拉入口；本机资料实测记录保留在本地。
-
-条款问答修订再新增3项回归，本地共69项通过，30条合成业务回归通过。新增覆盖单位及标准编号紧邻引用、章节内完整条目摘录与标题空结果、流式条款答案核验后保留。实际文档的草稿与最终答案另在本机核对，公开测试只使用合成条款。
+hash 模式只验证工程链路，真实模型小题集也不代表普遍质量。试探题“RRF 融合排名公式中的常数是多少”在离线模式下因现有证据过滤而保守拒答；本轮按方案保持检索策略，不为提高验收分数修改阈值或提示词。该限制与数值、公式类问题的效果应在后续独立评测中观察。

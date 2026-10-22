@@ -1,6 +1,6 @@
 """Personal ownership is shared by document, retrieval, history and evaluation access."""
 import pytest
-from app.models import Chunk, Document, KnowledgeBase, Organization
+from app.models import Chunk, Document, KnowledgeBase
 from sqlalchemy import select, text
 from test_api import create_kb, register, upload, wait_evaluation, wait_job
 
@@ -68,13 +68,13 @@ def test_legacy_organization_corpus_stays_stored_but_is_inaccessible(client):
     member_id = client.get('/api/auth/me', headers=member).json()['id']
     # Represent data created by an older release; no removed business endpoint is needed.
     with client.app.state.database.session() as db:
-        org = Organization(name='旧组织资料，待明确归属')
-        db.add(org)
-        db.flush()
-        db.get(KnowledgeBase, kb).organization_id = org.id
+        org_id = 'legacy-organization'
+        db.execute(text('INSERT INTO organizations (id, name, created_at) VALUES (:id, :name, :created)'),
+            {'id': org_id, 'name': '旧组织资料，待明确归属', 'created': '2026-10-21 00:00:00'})
+        db.get(KnowledgeBase, kb).organization_id = org_id
         for user_id in [owner_id, member_id]:
             db.execute(text('INSERT INTO memberships (organization_id, user_id, role) VALUES (:org, :user, :role)'),
-                {'org': org.id, 'user': user_id, 'role': 'admin'})
+                {'org': org_id, 'user': user_id, 'role': 'admin'})
             db.execute(text('INSERT INTO knowledge_base_grants (knowledge_base_id, user_id, role) VALUES (:kb, :user, :role)'),
                 {'kb': kb, 'user': user_id, 'role': 'admin'})
         db.commit()
@@ -105,3 +105,44 @@ def test_legacy_organization_corpus_stays_stored_but_is_inaccessible(client):
         assert db.get(KnowledgeBase, kb).organization_id is not None
         assert db.get(Document, doc) is not None
         assert db.scalar(select(Chunk).where(Chunk.document_id == doc)) is not None
+
+
+def test_deleted_document_cannot_be_reused_by_history_cache_or_evaluations(client, monkeypatch):
+    from app.models import EvaluationRun
+    from app.services import answering
+    from app.worker import process_evaluation
+
+    owner = register(client)
+    kb = create_kb(client, owner)
+    uploaded = upload(client, owner, kb, '住宿报销上限500元。'.encode())
+    assert wait_job(client, owner, uploaded['job_id'])['status'] == 'completed'
+    body = {'question': '住宿报销上限是多少', 'knowledge_base_ids': [kb], 'request_id': 'delete-evidence-1'}
+    answer = client.post('/api/chat', headers=owner, json=body).json()
+    assert '500' in answer['answer']
+    case = {'question': body['question'], 'message_id': answer['message_id']}
+    completed = client.post('/api/evaluations', headers=owner, json={'name': '旧答案', 'cases': [case]}).json()
+    assert wait_evaluation(client, owner, completed['id'])['status'] == 'completed'
+    client.app.state.worker_stop.set()
+    client.app.state.worker_thread.join(timeout=10)
+    queued = client.post('/api/evaluations', headers=owner, json={'name': '待执行旧答案', 'cases': [case]}).json()
+    assert client.delete('/api/documents/' + uploaded['document']['id'], headers=owner).status_code == 204
+    assert client.post('/api/chat', headers=owner, json=body).status_code == 409
+    history = client.get('/api/conversations/' + answer['conversation_id'], headers=owner).json()
+    assert not history['messages'][1]['citations'] and '500' not in history['messages'][1]['content']
+    assert client.post('/api/evaluations', headers=owner, json={'name': '不允许复用', 'cases': [case]}).status_code == 403
+    for run_id in [completed['id'], queued['id']]:
+        result = client.get('/api/evaluations/' + run_id, headers=owner).json()
+        assert result['status'] == 'restricted' and not result['cases'] and not result['results']
+    process_evaluation(client.app.state.database, client.app.state.settings, queued['id'])
+    with client.app.state.database.session() as db:
+        assert db.get(EvaluationRun, queued['id']).status == 'failed'
+    captured = []
+    real_answer = answering.answer_question
+    def capture(*args, **kwargs):
+        captured.extend(kwargs['history'])
+        return real_answer(*args, **kwargs)
+    monkeypatch.setattr(answering, 'answer_question', capture)
+    fresh = client.post('/api/chat', headers=owner, json={'question': '那上限是多少',
+        'conversation_id': answer['conversation_id'], 'knowledge_base_ids': [kb]})
+    assert fresh.status_code == 200 and not fresh.json()['citations']
+    assert all('500' not in message['content'] for message in captured)

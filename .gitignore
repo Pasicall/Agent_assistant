@@ -24,6 +24,7 @@ data/
 .vscode/
 artifacts/
 !docs/artifacts/
+!docs/history/artifacts/
 # Local agent instructions and implementation plan.
 AGENT.md
 personal-learning-assistant-plan.md
