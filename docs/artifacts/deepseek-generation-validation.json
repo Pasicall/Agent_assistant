@@ -1,0 +1,157 @@
+{
+  "date": "2026-10-24",
+  "scope": "Remote generation acceptance with hash vectors; semantic embedding acceptance deferred by user",
+  "model": "deepseek-flash",
+  "adapter": "openai",
+  "functional_passed": true,
+  "connection_probe_passed": true,
+  "local_model_inference": false,
+  "semantic_embedding_api_calls": 0,
+  "user_env_modified": false,
+  "business_data_accessed": false,
+  "isolated_temporary_database_and_vector_store": true,
+  "backend_tests": {
+    "passed": 94,
+    "failures": 0,
+    "errors": 0
+  },
+  "frontend_build": "passed",
+  "ruff": "passed",
+  "checks": {
+    "upload_and_dedup": true,
+    "original_download": true,
+    "idempotent_replay": true,
+    "answer_cache_without_model_call": true,
+    "standard_and_agent": true,
+    "citation_downloads": true,
+    "model_calls": true,
+    "history_evaluation": true,
+    "ordinary_evaluation": true,
+    "stream": true,
+    "empty_scope_abstention_without_model_call": true,
+    "replacement": true,
+    "historical_restore": true,
+    "deletion": true,
+    "deleted_history_hidden": true,
+    "cleanup_completed": true
+  },
+  "generation_results": {
+    "answers": 6,
+    "direct_model_answers": 6,
+    "extractive_fallback_answers": 0,
+    "numeric_verification_passed": 6,
+    "semantic_fact_verification_tested": false
+  },
+  "questions": [
+    {
+      "question": "文档上传默认最多接受多少 MiB 的文件？",
+      "expected_facts": [
+        "50"
+      ],
+      "answers": {
+        "standard": {
+          "answer": "文档上传默认最多接受 50 MiB 的文件 [1]。",
+          "provider": "deepseek-flash",
+          "facts_present": true,
+          "numeric_verification_passed": true,
+          "citation_count": 1,
+          "source_files": [
+            "architecture.md"
+          ],
+          "generation_calls_including_repair": 1
+        },
+        "agent": {
+          "answer": "文档上传默认最多接受 **50 MiB** 的文件[1]。",
+          "provider": "deepseek-flash",
+          "facts_present": true,
+          "numeric_verification_passed": true,
+          "citation_count": 1,
+          "source_files": [
+            "architecture.md"
+          ],
+          "generation_calls_including_repair": 1
+        }
+      }
+    },
+    {
+      "question": "切块默认窗口和重叠分别是多少字符？",
+      "expected_facts": [
+        "800",
+        "120"
+      ],
+      "answers": {
+        "standard": {
+          "answer": "默认切块窗口为 800 字符，重叠为 120 字符[1]。",
+          "provider": "deepseek-flash",
+          "facts_present": true,
+          "numeric_verification_passed": true,
+          "citation_count": 1,
+          "source_files": [
+            "architecture.md"
+          ],
+          "generation_calls_including_repair": 1
+        },
+        "agent": {
+          "answer": "切块默认窗口为800字符，重叠为120字符 [1]。",
+          "provider": "deepseek-flash",
+          "facts_present": true,
+          "numeric_verification_passed": true,
+          "citation_count": 1,
+          "source_files": [
+            "architecture.md"
+          ],
+          "generation_calls_including_repair": 2
+        }
+      }
+    },
+    {
+      "question": "Worker 的任务租约默认为多少秒？",
+      "expected_facts": [
+        "600"
+      ],
+      "answers": {
+        "standard": {
+          "answer": "Worker 的任务租约默认为 **600 秒**[1]。对应配置项 `RAG_JOB_LEASE_SECONDS` 的默认值同样是 600 秒[2]。",
+          "provider": "deepseek-flash",
+          "facts_present": true,
+          "numeric_verification_passed": true,
+          "citation_count": 2,
+          "source_files": [
+            "architecture.md",
+            "deployment.md"
+          ],
+          "generation_calls_including_repair": 1
+        },
+        "agent": {
+          "answer": "Worker 的任务租约默认为 **600 秒**[1][2]。处理期间由心跳续租；租约过期的处理中任务可被重新领取[1]。",
+          "provider": "deepseek-flash",
+          "facts_present": true,
+          "numeric_verification_passed": true,
+          "citation_count": 2,
+          "source_files": [
+            "architecture.md",
+            "deployment.md"
+          ],
+          "generation_calls_including_repair": 1
+        }
+      }
+    }
+  ],
+  "stream": {
+    "draft_events": 42,
+    "answer": "Worker 的任务租约默认为 600 秒 [1][2]。",
+    "provider": "deepseek-flash",
+    "cached": false,
+    "numeric_verification_passed": true,
+    "bounded_repair_used": true,
+    "generation_calls_including_repair": 2
+  },
+  "not_accepted_in_this_run": [
+    "Real semantic embedding and Dense/Hybrid quality comparison",
+    "Semantic retrieval before/after non-regression comparison",
+    "Ragas model scoring",
+    "LLM semantic fact verification (numeric verification used)",
+    "Real CrossEncoder weights and vision inference",
+    "Broad answer-quality evaluation beyond three repository-document questions"
+  ]
+}

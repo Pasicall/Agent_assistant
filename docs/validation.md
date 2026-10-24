@@ -38,11 +38,40 @@
 
 ## 真实模型对照：按用户要求停止
 
-已停止本地模型验收，并关闭本轮临时启动的 Ollama 服务。未下载新权重，未改动日常 `.env`，后续检查不调用模型。
+2026-10-22 已按用户要求停止本地模型验收，并关闭本轮临时启动的 Ollama 服务。未下载新权重，未改动日常 `.env`。2026-10-24 用户配置了远程 DeepSeek API，并授权仅验证不依赖真实 Embedding 的部分，结果见下节。
 
 停止前，阶段 3 基线使用已有 `qwen3:4b` 与 `qwen3-embedding:0.6b`（实际 1024 维）完成了三道问题的标准/Agent 共六次问答。六次生成均未通过现有数值核验，最终返回原文摘录；摘录中的关键事实与引用下载有效。这只能证明模型适配及回退链路可运行，不能作为生成答案质量通过的依据。
 
 修改后的真实模型运行在完成第一道问题后中断，未形成完整前后对照。真实语义检索与生成质量验收保留为未完成；未执行真实 Ragas 评分。下方离线检查仅用于验证工程流程和固定配置下的行为一致性。
+
+## 2026-10-24 补充：远程 DeepSeek 生成链路
+
+使用用户在本机 `.env` 配置的 DeepSeek `deepseek-flash` API，保留哈希向量作为流程支撑，关闭本地重排、视觉模型与 OCR；不调用真实 Embedding，不运行本地模型。全部资料来自仓库架构和部署文档，使用临时 SQLite / Qdrant local，不打开已有业务数据库，不改写用户 `.env`。
+
+| 检查 | 本次实际结果 |
+| --- | --- |
+| 项目实际模型适配器 | DeepSeek API 连通，一次真实生成返回有效答案 |
+| 三题 × 标准/Agent | 6/6 返回 DeepSeek 生成答案，关键事实 50、800/120、600 与引用核对通过；最终摘录回退 0 次 |
+| 引用与原件 | 生成答案引用的文档、版本原件下载通过 |
+| 请求重放与答案缓存 | 同一请求重放保持消息 ID；答案缓存复用时生成调用数为 0 |
+| 真实流式输出 | 关闭验收进程中的答案缓存后，收到 42 个模型草稿事件及最终结果；经一次有界修订后数值核验通过 |
+| 普通评测 / 历史复评 | 均完成；历史复评保留原答案与引用，未开启 Ragas |
+| 空库问答 | 拒答且无引用，未调用生成模型 |
+| 文档生命周期 | 上传、去重、替换、恢复原版本、删除、旧历史隐藏和持久清理通过 |
+| 后端回归 / 前端构建 / Ruff | 94 项后端测试通过；TypeScript / Vite 构建与 Ruff 通过 |
+
+数值核验是局部检查，本次未执行 LLM 语义事实核验。模型调用中出现过有界修订，最终答案通过现有核验；没有为通过验收修改提示词、核验阈值或检索算法。这三道问题只能说明生成链路与资料操作可运行，不能代表普遍回答质量，也不构成真实语义检索前后对照。
+
+精简结果见 [DeepSeek 验证汇总](artifacts/deepseek-generation-validation.json)；完整输出及日志位于忽略提交的 `artifacts/deepseek-2026-10-24/`。真实语义 Embedding、Ragas、真实重排和更大题集的质量验收继续保留为未完成。
+
+只验证远程生成链路时，从仓库根目录执行：
+
+```bash
+conda activate ./.conda-env
+python scripts/validate-personal.py --mode generation --lifecycle --output artifacts/deepseek-generation.json
+```
+
+此模式读取已配置的远程生成接口，仅在验收进程中显式使用哈希向量、数值核验，并禁用本地重排与视觉推理。它会产生真实 API 请求；`--with-ragas` 仅允许与完整语义配置的 `--mode configured` 一起使用。
 
 ## 可复现检查
 
@@ -58,7 +87,7 @@ cd frontend
 npm run build
 ```
 
-`validate-personal.py` 每次新建隔离 SQLite / Qdrant local，默认使用真实仓库文档和明确标注的 hash/摘录模式。可用 `--mode configured` 读取已选模型；`--snapshot` 先停稳 Worker 和关闭向量客户端再做协调备份，`--restore` 仅写入新的空目标，`--compare` 校验 ID、排序、证据和关键事实。`--with-ragas` 在资料流程中执行可选真实模型评分。CI 新增离线实际文档流程，外部服务任务继续覆盖 PostgreSQL、Redis、Qdrant server。
+`validate-personal.py` 每次新建隔离 SQLite / Qdrant local，默认使用真实仓库文档和明确标注的 hash/摘录模式。可用 `--mode generation` 仅验证远程生成，或用 `--mode configured` 读取完整语义模型配置；`--snapshot` 先停稳 Worker 和关闭向量客户端再做协调备份，`--restore` 仅写入新的空目标，`--compare` 校验模式、ID、排序、证据和关键事实。`--with-ragas` 在 configured 模式中执行可选真实模型评分。CI 新增离线实际文档流程，外部服务任务继续覆盖 PostgreSQL、Redis、Qdrant server。
 
 ## 验证边界
 
