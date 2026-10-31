@@ -11,6 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 def enqueue_delete(db, document):
+    from app.services.learning.sources import redact_document
+    redact_document(db, document.id)
     from app.models import DocumentRevision
     revisions = db.scalars(select(DocumentRevision).where(DocumentRevision.document_id == document.id)).all()
     paths = list({r.stored_path for r in revisions} | {document.stored_path})

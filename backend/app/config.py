@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     max_active_chats: int = Field(default=2, ge=1, le=32)
     global_active_chats: int = Field(default=4, ge=1, le=128)
     worker_role: str = "all"
+    learning_enabled: bool = True
+    learning_model_repairs: int = Field(default=1, ge=0, le=1)
     user_daily_model_requests: int = Field(default=500, ge=1)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     metrics_token: str = ""
@@ -76,8 +78,8 @@ class Settings(BaseSettings):
             raise ValueError("A standalone Redis worker requires a Qdrant server; local Qdrant is single-process")
         if self.citation_verifier not in {"numeric", "llm"}:
             raise ValueError("citation_verifier must be numeric or llm")
-        if self.worker_role not in {"all", "ingestion", "evaluation"}:
-            raise ValueError("worker_role must be all, ingestion or evaluation")
+        if self.worker_role not in {"all", "ingestion", "evaluation", "learning"}:
+            raise ValueError("worker_role must be all, ingestion, evaluation or learning")
         if self.environment.lower() == "production":
             if len(self.secret_key) < 32 or self.secret_key.startswith("development-only"):
                 raise ValueError("Production requires a unique RAG_SECRET_KEY of at least 32 characters")

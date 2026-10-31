@@ -41,4 +41,4 @@ def test_runtime_metadata_excludes_enterprise_models_but_keeps_frozen_tables(cli
     assert models.Base.metadata.sorted_tables  # Compatibility foreign keys still resolve.
     assert legacy_tables <= set(inspect(client.app.state.database.engine).get_table_names())
     with client.app.state.database.session() as db:
-        assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '006_operations'
+        assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '007_learning'

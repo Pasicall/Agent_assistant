@@ -344,10 +344,26 @@ docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.mo
 
 ### 从旧版升级
 
-升级前停稳全部 API/Worker，按前述步骤保存数据库、原文件与向量的协调备份并验证。个人库、文档、版本、分块和会话 ID 保持，未改变模型及分块配置时无需全量重新索引。Alembic head 仍为 `006_operations`，不要通过重建数据库或 `create_all()` 升级。
+升级前停稳全部 API/Worker，按前述步骤保存数据库、原文件与向量的协调备份并验证。个人库、文档、版本、分块和会话 ID 保持，未改变模型及分块配置时无需全量重新索引。专题学习 v0.2.0 的 Alembic head 为 `007_learning`，不要通过重建数据库或 `create_all()` 升级。
 
 冻结迁移保留旧组织、成员授权、审计、OIDC、动态策略表及知识库兼容列。运行代码不再读写这些业务，非空 `organization_id` 的资料停止出现在个人范围内，但不会被自动转移或删除。升级前应清点这类资料、关联文档和历史引用，在副本中验证后再切换。
 
 旧 OIDC 账户不保证具有可用的普通密码；应先确认恢复登录方式，不能自动设置默认密码。旧全局/账户动态配额不再生效：先列出与静态配置的差异，把仍需保留的全局限制写入部署配置；本版不提供差异化账户策略。需要转移旧组织资料或处理旧身份时，另行制定明确的所有者映射和数据迁移步骤。
 
 当前 Compose 为单实例存储部署。多个 API/Worker 主机需要共享原件存储、数据库/向量副本和模型容量规划，并在目标环境验证故障切换。
+
+## 专题学习 v0.2.0 升级
+
+本版新增 `007_learning` 迁移和 `learning-worker` 服务，不需要新数据库、模型依赖或重新建立既有向量索引。升级前停稳旧 API/Worker，使用现有维护流程备份并验证，然后执行迁移并启动匹配的新代码：
+
+```bash
+# 本地：在 backend 目录、已激活项目环境后运行
+python -m app.maintenance migrate
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8010
+```
+
+开发模式 `RAG_AUTO_MIGRATE=true` 时启动会执行增量迁移；生产模式继续使用 Compose 的 migrate 服务。Compose 新增专门处理学习 Job 的 `learning-worker`；无 Redis 时现有 API 内 Worker 也会执行学习作业。
+
+新增配置：`RAG_LEARNING_ENABLED=true`、`RAG_LEARNING_MODEL_REPAIRS=1`。`RAG_WORKER_ROLE` 增加 `learning` 选项。关闭学习功能会隐藏入口、停止执行学习 Job，并保留数据库中的学习记录。
+
+学习评价使用当前生成模型配置，按每次模型适配器调用扣每日预算，格式修复也占预算。供应商适配器内部的网络重试仍沿用原配置。缺少模型时提交仍会保存，配置后可重试；不要把离线模板预览当作已经完成真实模型效果验收。

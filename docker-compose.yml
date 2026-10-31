@@ -52,6 +52,8 @@ x-backend: &backend
     RAG_CITATION_VERIFIER: ${RAG_CITATION_VERIFIER:-numeric}
     RAG_VERIFIER_MODEL: ${RAG_VERIFIER_MODEL:-}
     RAG_EVIDENCE_MIN_COVERAGE: ${RAG_EVIDENCE_MIN_COVERAGE:-0.25}
+    RAG_LEARNING_ENABLED: ${RAG_LEARNING_ENABLED:-true}
+    RAG_LEARNING_MODEL_REPAIRS: ${RAG_LEARNING_MODEL_REPAIRS:-1}
     RAG_METRICS_TOKEN: ${RAG_METRICS_TOKEN:-}
     HF_HOME: /app/data/models
   volumes:
@@ -132,6 +134,20 @@ services:
     environment:
       <<: *backend-env
       RAG_WORKER_ROLE: evaluation
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -m, app.health, worker]
+      interval: 30s
+      timeout: 10s
+      start_period: 60s
+  learning-worker:
+    <<: *backend
+    command: [python, -m, app.worker]
+    environment:
+      <<: *backend-env
+      RAG_WORKER_ROLE: learning
     depends_on:
       migrate:
         condition: service_completed_successfully

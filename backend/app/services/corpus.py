@@ -16,10 +16,11 @@ def term_rows(chunk_id, text):
 
 
 class CorpusScope:
-    def __init__(self, db, user, selected):
+    def __init__(self, db, user, selected, document_ids=None):
         from fastapi import HTTPException
         self.db = db
         self.user_id = user.id
+        self.document_ids = None if document_ids is None else sorted(set(document_ids))
         query = select(KnowledgeBase.id, KnowledgeBase.generation).where(allowed_kbs(user.id))
         if selected:
             query = query.where(KnowledgeBase.id.in_(selected))
@@ -31,6 +32,14 @@ class CorpusScope:
             select(KnowledgeBase.id).where(allowed_kbs(user.id))),
             Document.active_revision_id.is_not(None), Chunk.revision_id == Document.active_revision_id,
             Document.status != "deleting", or_(Document.expires_at.is_(None), Document.expires_at > utcnow())]
+        if self.document_ids is not None:
+            available = set(db.scalars(select(Document.id).where(
+                Document.knowledge_base_id.in_(self.kb_ids), Document.id.in_(self.document_ids),
+                Document.active_revision_id.is_not(None), Document.status != "deleting",
+                or_(Document.expires_at.is_(None), Document.expires_at > utcnow()))).all())
+            if available != set(self.document_ids):
+                raise HTTPException(404, "所选文档不存在、未就绪或已过期")
+            self.conditions.append(Document.id.in_(self.document_ids))
 
     def __len__(self):
         return self.db.scalar(select(func.count()).select_from(Chunk).join(Document).where(*self.conditions)) or 0
@@ -38,7 +47,7 @@ class CorpusScope:
     def fingerprint(self):
         current = self.db.execute(select(KnowledgeBase.id, KnowledgeBase.generation).where(
             KnowledgeBase.id.in_(self.kb_ids), allowed_kbs(self.user_id)).order_by(KnowledgeBase.id)).all()
-        return hashlib.sha256(json.dumps([[(r.id, r.generation) for r in current], len(self)]).encode()).hexdigest()
+        return hashlib.sha256(json.dumps([[(r.id, r.generation) for r in current], self.document_ids, len(self)]).encode()).hexdigest()
 
     def hydrate(self, ids):
         if not ids:
@@ -102,8 +111,10 @@ class CorpusScope:
         from qdrant_client import models
         current_ids = self.db.scalars(select(KnowledgeBase.id).where(
             KnowledgeBase.id.in_(self.kb_ids), allowed_kbs(self.user_id))).all()
-        return models.Filter(must=[models.FieldCondition(key="knowledge_base_id",
-            match=models.MatchAny(any=list(current_ids)))])
+        conditions = [models.FieldCondition(key="knowledge_base_id", match=models.MatchAny(any=list(current_ids)))]
+        if self.document_ids is not None:
+            conditions.append(models.FieldCondition(key="document_id", match=models.MatchAny(any=self.document_ids)))
+        return models.Filter(must=conditions)
 
 
 def active_chunks_condition():

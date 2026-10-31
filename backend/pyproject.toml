@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rag-knowledge-assistant"
-version = "0.1.0"
+version = "0.2.0"
 description = "知衡：面向个人学习资料、可溯源、支持混合检索的知识库"
 requires-python = ">=3.11"
 dependencies = [
@@ -33,6 +33,7 @@ include = ["app*", "migrations*"]
 
 [tool.setuptools.package-data]
 migrations = ["*.ini"]
+"app.services.learning" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -121,6 +121,8 @@ def create_app(settings=None):
         return response
 
     app.include_router(router)
+    from app.api.learning import router as learning_router
+    app.include_router(learning_router)
     from app.api.document_lifecycle import router as document_lifecycle_router
     app.include_router(document_lifecycle_router)
     from app.api.diagnostics import router as diagnostics_router

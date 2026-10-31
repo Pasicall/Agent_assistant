@@ -11,12 +11,13 @@ ROOT = Path(__file__).resolve().parents[2]
 def test_compose_only_forwards_supported_application_settings():
     compose = yaml.safe_load((ROOT / 'docker-compose.yml').read_text())
     supported = {'RAG_' + key.upper() for key in Settings.model_fields}
-    for service in ['api', 'worker', 'evaluation-worker', 'migrate']:
+    for service in ['api', 'worker', 'evaluation-worker', 'learning-worker', 'migrate']:
         variables = set(compose['services'][service]['environment'])
         assert {key for key in variables if key.startswith('RAG_')} <= supported
     assert compose['services']['api']['environment']['RAG_ENVIRONMENT'] == 'production'
     assert compose['services']['worker']['environment']['RAG_WORKER_ROLE'] == 'ingestion'
     assert compose['services']['evaluation-worker']['environment']['RAG_WORKER_ROLE'] == 'evaluation'
+    assert compose['services']['learning-worker']['environment']['RAG_WORKER_ROLE'] == 'learning'
 
 
 def test_environment_examples_have_no_removed_or_unknown_application_fields():

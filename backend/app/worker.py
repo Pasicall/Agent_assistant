@@ -225,7 +225,9 @@ def process_evaluation(database, settings, run_id):
 
 
 def run_worker(database, settings, stop):
+    from app.models import LearningJob
     from app.services.cleanup import process_cleanup
+    from app.services.learning.jobs import process_learning, ready_condition
     from app.services.observability import worker_heartbeat
     def pulse():
         while not stop.is_set():
@@ -250,6 +252,7 @@ def run_worker(database, settings, stop):
                     CleanupTask.lease_expires_at < now)).limit(20)).all()
                 evaluations = db.scalars(select(EvaluationRun.id).where(or_(EvaluationRun.status == "queued",
                     (EvaluationRun.status == "running") & (EvaluationRun.lease_expires_at < now))).limit(1)).all()
+                learning = db.scalars(select(LearningJob.id).where(ready_condition()).order_by(LearningJob.created_at).limit(1)).all() if settings.learning_enabled and settings.worker_role in {"all", "learning"} else []
                 db.execute(delete(AdmissionSlot).where(AdmissionSlot.expires_at < now))
                 db.commit()
             for task_id in cleanup:
@@ -261,7 +264,10 @@ def run_worker(database, settings, stop):
             for run_id in evaluations:
                 if not stop.is_set() and settings.worker_role in {"all", "evaluation"}:
                     process_evaluation(database, settings, run_id)
-            if settings.redis_url and not pending and not evaluations and not cleanup:
+            for learning_id in learning:
+                if not stop.is_set():
+                    process_learning(database, settings, learning_id)
+            if settings.redis_url and not pending and not evaluations and not cleanup and not learning:
                 try:
                     with Redis.from_url(settings.redis_url, socket_connect_timeout=2, socket_timeout=3) as client:
                         client.brpop(settings.qdrant_collection_prefix + ":" + QUEUE_KEY,
