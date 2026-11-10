@@ -72,10 +72,12 @@ def update_metadata(document_id: str, body: DocumentMetadataRequest, db: DB, use
         value = datetime.fromisoformat(body.expires_at.replace("Z", "+00:00")) if body.expires_at else None
         if value and value.tzinfo is None:
             raise ValueError("timezone required")
-        doc.expires_at = value.astimezone(UTC).replace(tzinfo=None) if value else None
+        if "expires_at" in body.model_fields_set:
+            doc.expires_at = value.astimezone(UTC).replace(tzinfo=None) if value else None
     except ValueError:
         raise HTTPException(422, "expires_at 必须为包含时区的 ISO 时间")
-    doc.source = body.source
+    if "source" in body.model_fields_set:
+        doc.source = body.source
     db.execute(update(KnowledgeBase).where(KnowledgeBase.id == doc.knowledge_base_id)
         .values(generation=KnowledgeBase.generation + 1))
     db.commit()
@@ -92,9 +94,11 @@ async def sync_source(body: SourceSyncRequest, request: Request, db: DB, user: C
     from app.services.admission import consume
     require_kb(db, user, body.knowledge_base_id)
     settings = request.app.state.settings
-    consume(request.app.state.database, f"sync:{user.id}", 5, 60)
+    if not settings.browser_source_sync_enabled:
+        raise HTTPException(403, "此部署未开放浏览器目录同步")
     if not settings.source_sync_root:
         raise HTTPException(503, "尚未配置文档源目录")
+    consume(request.app.state.database, f"sync:{user.id}", 5, 60)
     root = settings.source_sync_root.resolve()
     target = (root / body.relative_path).resolve()
     if not target.is_relative_to(root) or not target.exists():

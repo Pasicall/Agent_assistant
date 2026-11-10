@@ -163,7 +163,9 @@ def run(args, report):
         log("API 健康，创建或复用本机验收账户")
         account = account_for(client)
         kb_id = account["knowledge_base_id"]
-        runtime = request(client, "GET", "system")
+        token = os.getenv("RAG_DIAGNOSTICS_TOKEN", dotenv_values(ROOT / ".env").get("RAG_DIAGNOSTICS_TOKEN"))
+        require(bool(token), "请为 API 和验收脚本设置 RAG_DIAGNOSTICS_TOKEN，并启用 RAG_EVALUATION_ENABLED")
+        runtime = request(client, "GET", "system", headers={"Authorization": "Bearer " + token})
         require(runtime["embedding_provider"] == "ollama", "Embedding provider 未配置为 Ollama")
         require(runtime.get("llm_backend") == "ollama", "LLM backend 未配置为 Ollama")
         report["runtime"] = {key: runtime.get(key) for key in (

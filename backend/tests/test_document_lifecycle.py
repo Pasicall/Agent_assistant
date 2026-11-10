@@ -51,3 +51,30 @@ def test_expiry_invalidates_cached_answer(client):
     assert expired.status_code == 200
     answer = ask(client, headers, kb)
     assert answer['citations'] == [] and answer['abstained']
+
+
+def test_failed_replacement_keeps_active_revision_and_safe_error(client, monkeypatch):
+    from app.services import parsing
+
+    headers = register(client)
+    kb = create_kb(client, headers)
+    uploaded = upload(client, headers, kb, '住宿报销上限500元。'.encode())
+    wait_job(client, headers, uploaded['job_id'])
+    document = client.get('/api/documents', headers=headers).json()[0]
+
+    def fail_parse(*args, **kwargs):
+        raise ValueError('/private/provider/config: sensitive ingestion error')
+
+    monkeypatch.setattr(parsing, 'parse_document', fail_parse)
+    response = client.post('/api/documents/upload', headers=headers,
+        data={'knowledge_base_id': kb, 'document_id': document['id']},
+        files={'file': ('update.txt', '住宿报销上限600元。'.encode())})
+    assert response.status_code == 201
+    job = wait_job(client, headers, response.json()['job_id'])
+    failed_update = client.get('/api/documents', headers=headers).json()[0]
+    assert job['status'] == 'failed'
+    assert failed_update['status'] == 'ready'
+    assert failed_update['active_revision_id'] == document['active_revision_id']
+    assert failed_update['error'] == job['error']
+    assert '/private/' not in job['error']
+    assert '500' in ask(client, headers, kb)['answer']

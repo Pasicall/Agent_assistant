@@ -3,9 +3,15 @@ import secrets
 
 from fastapi import APIRouter, HTTPException, Request, Response
 
-from app.api.dependencies import CurrentUser
-
 router = APIRouter(prefix="/api")
+
+
+def require_operator(request: Request):
+    token = request.app.state.settings.diagnostics_token
+    if not token:
+        raise HTTPException(404)
+    if not secrets.compare_digest(request.headers.get("Authorization", "").encode(), ("Bearer " + token).encode()):
+        raise HTTPException(401, "需要运维凭据")
 
 
 @router.get("/ready")
@@ -30,6 +36,7 @@ def prometheus_metrics(request: Request):
 
 
 @router.get("/ready/models")
-def models_ready(request: Request, user: CurrentUser):
+def models_ready(request: Request):
+    require_operator(request)
     from app.health import model_checks
     return {"checks": model_checks(request.app.state.settings), "scope": "API connectivity and model listing; no inference"}

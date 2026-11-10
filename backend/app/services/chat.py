@@ -121,7 +121,8 @@ def run_chat(body, db, user, request, emit=None, cancelled=None):
             metadata = {"provider": result.get("provider"), "usage": result.get("usage", {}),
                 "prompt_version": PROMPT_VERSION, "embedding_model": settings.embedding_model,
                 "reranker_model": settings.reranker_model, "request_id": key,
-                "timings_ms": result.get("timings_ms", {}), "verification": result.get("verification", {})}
+                "timings_ms": result.get("timings_ms", {}), "verification": result.get("verification", {}),
+                "abstained": result.get("abstained", False)}
             last = db.scalar(select(func.max(Message.created_at)).where(Message.conversation_id == conversation_id))
             timestamp = max(utcnow(), last + timedelta(microseconds=1)) if last else utcnow()
             db.add(Message(conversation_id=conversation_id, role="user", content=body.question, created_at=timestamp))

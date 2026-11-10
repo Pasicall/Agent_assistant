@@ -19,7 +19,7 @@ DB = Annotated[Session, Depends(get_db)]
 
 
 def current_user(request: Request, db: DB,
-                 credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
+                credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]):
     token = credentials.credentials if credentials else request.cookies.get("rag_session")
     claims = token_claims(token, request.app.state.settings) if token else None
     subject = claims["sub"] if claims else None

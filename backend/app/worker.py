@@ -250,8 +250,10 @@ def run_worker(database, settings, stop):
                 cleanup = db.scalars(select(CleanupTask.id).where(CleanupTask.status.in_(["queued", "processing"]),
                     CleanupTask.available_at <= now, or_(CleanupTask.lease_expires_at.is_(None),
                     CleanupTask.lease_expires_at < now)).limit(20)).all()
-                evaluations = db.scalars(select(EvaluationRun.id).where(or_(EvaluationRun.status == "queued",
-                    (EvaluationRun.status == "running") & (EvaluationRun.lease_expires_at < now))).limit(1)).all()
+                evaluations = []
+                if settings.evaluation_enabled and settings.worker_role in {"all", "evaluation"}:
+                    evaluations = db.scalars(select(EvaluationRun.id).where(or_(EvaluationRun.status == "queued",
+                        (EvaluationRun.status == "running") & (EvaluationRun.lease_expires_at < now))).limit(1)).all()
                 learning = db.scalars(select(LearningJob.id).where(ready_condition()).order_by(LearningJob.created_at).limit(1)).all() if settings.learning_enabled and settings.worker_role in {"all", "learning"} else []
                 db.execute(delete(AdmissionSlot).where(AdmissionSlot.expires_at < now))
                 db.commit()

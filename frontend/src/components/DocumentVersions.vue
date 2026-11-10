@@ -1,46 +1,172 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue'
-import { api } from '../api'
-import type { Document } from '../api'
-const props = defineProps<{ document: Document; writable: boolean; onChanged: () => Promise<void> }>()
-defineEmits<{ close: [] }>()
-type Version = { id: string; name: string; status: string; active: boolean; created_at: string; size_bytes: number }
-const versions = ref<Version[]>([]), error = ref(''), busy = ref(false)
-const source = ref(props.document.source || 'upload')
-function localInput(value: string) { const date = new Date(value.endsWith('Z') ? value : value + 'Z'); return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16) }
-const expires = ref(props.document.expires_at ? localInput(props.document.expires_at) : '')
-let timer: ReturnType<typeof setInterval> | undefined
-const labels: Record<string, string> = { ready: '已发布', queued: '排队中', processing: '处理中', failed: '处理失败' }
-async function refresh() { versions.value = await api(`/documents/${props.document.id}/versions`) }
-async function run(action: () => Promise<unknown>) {
-  busy.value = true; error.value = ''
-  try { await action(); await refresh(); await props.onChanged() }
-  catch (reason) { error.value = reason instanceof Error ? reason.message : '操作失败' }
+import { computed, ref, watch } from 'vue'
+import { api, downloadDocument, type Chunk, type Document, type Job } from '../api'
+import { available, dateText, documentStatus, errorText, expired, fileProblem, parseTime, processing, uploadExtensions } from '../workspace'
+import WorkspaceDialog from './WorkspaceDialog.vue'
+
+const props = defineProps<{
+  document: Document
+  maxMb?: number
+  restoring: boolean
+  onChanged: (doc: Document, jobId?: string, restore?: boolean) => Promise<boolean>
+}>()
+const emit = defineEmits<{ close: [] }>()
+type Version = { id: string; name: string; status: string; active: boolean; created_at: string }
+const versions = ref<Version[]>([])
+const chunks = ref<Chunk[]>([])
+const job = ref<Job>()
+const error = ref('')
+const notice = ref('')
+const loading = ref(false)
+const busy = ref(false)
+const readError = ref('')
+const previewVersion = ref<Version>()
+const previewReadAt = ref('')
+const currentVersion = computed(() => versions.value.find(version => version.id === props.document.active_revision_id))
+const updateInput = ref<HTMLInputElement>()
+const expires = ref(localInput(props.document.expires_at))
+const labels: Record<string, string> = { ready: '已发布', queued: '等待处理', processing: '处理中', failed: '处理失败' }
+
+function localInput(value?: string) {
+  if (!value) return ''
+  const date = parseTime(value)
+  return Number.isFinite(date.getTime()) ? new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16) : ''
+}
+
+let readSequence = 0
+async function refresh() {
+  const id = ++readSequence
+  loading.value = true
+  readError.value = ''
+  const doc = props.document
+  try {
+    const nextVersions = await api<Version[]>(`/documents/${doc.id}/versions`)
+    const active = nextVersions.find(version => version.active)
+    const [nextChunks, nextJob] = await Promise.all([
+      active ? api<Chunk[]>(`/documents/${doc.id}/chunks`) : [],
+      doc.job_id && processing(doc) ? api<Job>(`/jobs/${doc.job_id}`) : undefined,
+    ])
+    const confirmed = await api<Version[]>(`/documents/${doc.id}/versions`)
+    if (active?.id !== confirmed.find(version => version.active)?.id) throw new Error('活动版本正在切换，请重新读取详情。')
+    if (id !== readSequence) return
+    versions.value = confirmed
+    chunks.value = nextChunks
+    previewVersion.value = active
+    previewReadAt.value = new Date().toISOString()
+    job.value = nextJob
+  } catch (reason) { if (id === readSequence) readError.value = errorText(reason) }
+  finally { if (id === readSequence) loading.value = false }
+}
+
+watch(() => [props.document.active_revision_id, props.document.job_id, props.document.updated_at, props.document.status], refresh, { immediate: true })
+
+async function mutate(action: () => Promise<void>) {
+  if (busy.value) return
+  busy.value = true
+  error.value = ''
+  notice.value = ''
+  try { await action() } catch (reason) { error.value = errorText(reason) }
   finally { busy.value = false }
 }
+
 async function upload(event: Event) {
-  const input = event.target as HTMLInputElement, file = input.files?.[0]
-  if (!file) return
-  const form = new FormData(); form.set('file', file); form.set('knowledge_base_id', props.document.knowledge_base_id); form.set('document_id', props.document.id)
-  await run(() => api('/documents/upload', { method: 'POST', body: form })); input.value = ''
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file || !props.maxMb) return
+  input.value = ''
+  await mutate(async () => {
+    const problem = fileProblem(file, props.maxMb!)
+    if (problem) throw new Error(problem)
+    const doc = props.document
+    const form = new FormData()
+    form.set('file', file)
+    form.set('knowledge_base_id', doc.knowledge_base_id)
+    form.set('document_id', doc.id)
+    const result = await api<{ document: Document }>('/documents/upload', { method: 'POST', body: form })
+    notice.value = '更新文件已接收。'
+    if (!await props.onChanged(result.document)) notice.value += '资料列表暂未刷新。'
+  })
 }
-onMounted(() => { void run(refresh); timer = setInterval(() => {
-  if (!busy.value && versions.value.some(version => ['queued', 'processing'].includes(version.status))) void run(refresh)
-}, 2500) })
-onUnmounted(() => clearInterval(timer))
+
+function reprocess(versionId?: string) {
+  return mutate(async () => {
+    const doc = props.document
+    const path = versionId ? `versions/${versionId}/restore` : 'retry'
+    const { job_id } = await api<{ job_id: string }>(`/documents/${doc.id}/${path}`, { method: 'POST' })
+    notice.value = versionId ? '已提交恢复，后台发布后才会切换版本。' : '已提交重新处理。'
+    if (!await props.onChanged({ ...doc, job_id, status: 'queued', error: undefined }, job_id, !!versionId)) notice.value += '资料列表暂未刷新。'
+  })
+}
+
+function saveExpiry() {
+  return mutate(async () => {
+    const doc = props.document
+    const { expires_at } = await api<{ expires_at?: string }>(`/documents/${doc.id}/metadata`, {
+      method: 'PATCH', body: JSON.stringify({ expires_at: expires.value ? new Date(expires.value).toISOString() : null }),
+    })
+    notice.value = '有效期已保存。'
+    if (!await props.onChanged({ ...doc, expires_at })) notice.value += '资料列表暂未刷新。'
+  })
+}
 </script>
+
 <template>
-  <div class="modal-backdrop" @click.self="$emit('close')"><section class="modal versions-modal" role="dialog" aria-modal="true" aria-labelledby="versions-title">
-    <div class="modal-header"><span class="eyebrow">DOCUMENT LIFECYCLE</span><button class="text-button" @click="$emit('close')">关闭</button></div>
-    <h2 id="versions-title">文档版本与有效期</h2><p>{{ document.name }} · 新版本完成后切换，重建期间继续使用原版本。</p>
-    <p v-if="error" role="alert" class="version-error">{{ error }}</p>
-    <template v-if="writable"><label>上传更新文件<input type="file" :disabled="busy" accept=".pdf,.docx,.txt,.md,.csv,.json,.html,.png,.jpg,.jpeg,.webp" @change="upload" /></label>
-      <form @submit.prevent="run(() => api(`/documents/${document.id}/metadata`, { method: 'PATCH', body: JSON.stringify({ source, expires_at: expires ? new Date(expires).toISOString() : null }) }))">
-        <label>来源标识<input v-model="source" maxlength="2000" /></label><label>有效期至（本地时间，留空为长期有效）<input v-model="expires" type="datetime-local" /></label><button class="btn secondary" :disabled="busy">保存来源与有效期</button>
-      </form></template>
-    <div class="version-list"><article v-for="version in versions" :key="version.id"><div><strong>{{ version.name }}</strong><small>{{ new Date(version.created_at + 'Z').toLocaleString() }} · {{ labels[version.status] || version.status }} {{ version.active ? '· 当前使用' : '' }}</small><code :title="version.id">版本 {{ version.id.slice(0, 8) }}</code></div><button v-if="writable && !version.active" class="text-button" :disabled="busy" @click="run(() => api(`/documents/${document.id}/versions/${version.id}/restore`, { method: 'POST' }))">恢复此版本</button></article></div>
-  </section></div>
+  <WorkspaceDialog :title="document.name" drawer :busy="busy" @close="emit('close')">
+    <div class="inline-actions">
+      <button class="text-button" :disabled="busy" @click="mutate(() => downloadDocument(document.id, document.name, document.active_revision_id))">下载原文</button>
+    </div>
+    <p>{{ documentStatus(document, restoring) }} · {{ document.source?.startsWith('folder:') ? '目录同步' : '上传' }}</p>
+    <p v-if="document.active_revision_id"><strong>{{ document.name }}</strong> · 当前使用 <time v-if="currentVersion">· {{ dateText(currentVersion.created_at) }}</time></p>
+    <p v-else class="muted">尚未发布可用版本</p>
+    <p v-if="expired(document)">资料已过期，调整有效期后可用于新的问答。</p>
+    <p v-else-if="available(document) && (processing(document) || document.error)">已发布的版本仍可用于新的问答。</p>
+    <p v-if="job && processing(document)" role="status">{{ job.stage || '等待处理' }} · {{ Math.round(job.progress) }}%
+      <span v-if="job.total_pages"> · {{ job.processed_pages || 0 }}/{{ job.total_pages }} 页</span>
+    </p>
+    <div v-if="document.error" class="alert error-alert">
+      <p>{{ document.error }}</p>
+      <button v-if="!document.active_revision_id" class="text-button" :disabled="busy || processing(document)" @click="reprocess()">重新处理</button>
+      <button class="text-button" :disabled="busy || processing(document) || !maxMb" @click="updateInput?.click()">上传更新文件</button>
+    </div>
+    <input ref="updateInput" type="file" hidden :accept="uploadExtensions" @change="upload" />
+    <p v-if="error" class="alert error-alert" role="alert">{{ error }}</p>
+    <p v-if="notice" class="workspace-notice" role="status">{{ notice }}</p>
+    <p v-if="readError" class="alert error-alert" role="alert">{{ readError }} <button class="text-button" @click="refresh">重新读取详情</button></p>
+
+    <section>
+      <h3>解析文本{{ previewVersion ? ' · ' + previewVersion.name : '' }}</h3>
+      <p v-if="previewReadAt" class="muted">最近成功读取于 {{ dateText(previewReadAt) }}{{ previewVersion ? ' · 版本时间 ' + dateText(previewVersion.created_at) : '' }}</p>
+      <p v-if="previewReadAt && (loading || readError || previewVersion?.id !== document.active_revision_id)" role="status">
+        {{ loading ? '正在读取最新详情。' : '最新详情暂未取得。' }}下方保留最近成功读取的文本。
+      </p>
+      <p v-if="loading && !chunks.length">正在读取详情…</p>
+      <p v-else-if="!chunks.length && !readError">暂无已解析文本。</p>
+      <div class="document-excerpts">
+        <article v-for="chunk in chunks" :key="chunk.id">
+          <small>{{ chunk.page ? `第 ${chunk.page} 页` : `片段 ${chunk.ordinal + 1}` }}</small>
+          <p>{{ chunk.text }}</p>
+        </article>
+      </div>
+    </section>
+
+    <details>
+      <summary>版本与有效期</summary>
+      <div class="action-stack">
+        <label v-if="maxMb">上传更新文件<input type="file" :disabled="busy || processing(document)" :accept="uploadExtensions" @change="upload" /></label>
+        <button class="btn secondary" :disabled="busy || processing(document)" @click="reprocess()">重新处理</button>
+        <form class="action-stack" @submit.prevent="saveExpiry">
+          <label>有效期至（本地时间，留空为长期有效）<input v-model="expires" type="datetime-local" /></label>
+          <button class="btn secondary" :disabled="busy">保存有效期</button>
+        </form>
+        <ul class="version-list">
+          <li v-for="version in versions" :key="version.id">
+            <strong>{{ version.name }}</strong>
+            <small>{{ dateText(version.created_at) }} · {{ labels[version.status] || version.status }} {{ version.active ? '· 当前使用' : '' }}</small>
+            <code>{{ version.id }}</code>
+            <button v-if="!version.active && version.status === 'ready'" class="text-button" :disabled="busy || processing(document)" @click="reprocess(version.id)">恢复此版本</button>
+          </li>
+        </ul>
+      </div>
+    </details>
+  </WorkspaceDialog>
 </template>
-<style scoped>
-.versions-modal{max-width:760px;max-height:90vh;overflow:auto}.versions-modal>p{font-size:14px;color:#718078;line-height:1.8}.versions-modal label{display:flex;flex-direction:column;gap:8px;margin:16px 0;font-size:14px}.versions-modal input{padding:10px;border:1px solid #dce5df;border-radius:8px}.version-list article{display:flex;align-items:center;justify-content:space-between;padding:16px 0;border-top:1px solid #e7ece8}.version-list small,.version-list code{display:block;font-size:14px;margin-top:6px;color:#77867d}.version-error{color:#b34747!important}
-</style>

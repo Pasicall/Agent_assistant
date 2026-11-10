@@ -1,129 +1,621 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ArrowRight, BookOpen, Check, ChevronLeft, Clock3, Lightbulb, LoaderCircle, Plus, RefreshCw, Target, Trash2 } from 'lucide-vue-next'
-import { downloadDocument } from '../../api'
-import type { Document, KnowledgeBase } from '../../api'
-import { learning } from '../../api/learning'
-import type { Attempt, LearningHistory, LearningTask, Source, Workspace, WorkspaceSummary } from '../../api/learning'
-const props = defineProps<{ knowledgeBases: KnowledgeBase[]; documents: Document[]; userId: string; modelReady: boolean }>()
-const summaries = ref<WorkspaceSummary[]>([]), workspace = ref<Workspace | null>(null)
-const task = ref<LearningTask | null>(null), history = ref<LearningHistory | null>(null)
-const creating = ref(false), busy = ref(false), error = ref(''), message = ref(''), tab = ref('task')
-const kbId = ref(''), documentIds = ref<string[]>([]), goal = ref('我想理解数据库事务，并能分析并发场景下的数据异常。')
-const answer = ref(''), selectedTaskId = ref(''), hint = ref<{ level: number; text: string; sources: Source[] } | null>(null)
-const correction = ref<{ attempt: Attempt; reason: string; key: string } | null>(null)
-let timer: ReturnType<typeof setInterval> | undefined, polling = false, disposed = false
-let creationKey = crypto.randomUUID(), lastSubmission: { text: string; task: string; key: string } | null = null
-const options = computed(() => props.documents.filter(d => d.knowledge_base_id === kbId.value))
-const running = computed(() => workspace.value?.jobs.some(j => ['queued', 'running'].includes(j.status)) || false)
-const visibleTask = computed(() => !!workspace.value && ['active', 'completed', 'needs_practice'].includes(workspace.value.status))
+import { readLocal, writeLocal, removeLocal } from '../../storage'
+import { computed, onMounted, ref, toRef } from 'vue'
+import { ApiError, downloadDocument, type Document, type KnowledgeBase } from '../../api'
+import { learning, type Attempt, type Capability, type LearningHistory, type LearningTask, type Source, type Workspace, type WorkspaceSummary } from '../../api/learning'
+import { available, dateText, errorText, record, useVisiblePolling } from '../../workspace'
+import ConfirmAction from '../ConfirmAction.vue'
+import WorkspaceDialog from '../WorkspaceDialog.vue'
+import LearningFeedback from './LearningFeedback.vue'
+import LearningHint from './LearningHint.vue'
+
+const props = defineProps<{ knowledgeBases: KnowledgeBase[]; documents: Document[]; userId: string; modelReady: boolean; active: boolean }>()
+const emit = defineEmits<{ upload: [id: string] }>()
+const summaries = ref<WorkspaceSummary[]>([])
+const workspace = ref<Workspace>()
+const task = ref<LearningTask>()
+const history = ref<LearningHistory>()
+const feedback = ref<Attempt>()
+const feedbackTask = ref<LearningTask>()
+const recommendedTask = ref<LearningTask>()
+const historical = ref<{ attempt: Attempt; task: LearningTask }>()
+const creating = ref(false)
+const listLoaded = ref(false)
+const busy = ref(false)
+const error = ref('')
+const notice = ref('')
+const tab = ref<'task' | 'history'>('task')
+const kbId = ref('')
+const documentIds = ref<string[]>([])
+const goal = ref('我想理解数据库事务，并能分析并发场景下的数据异常。')
+const reviewed = ref(new Set<string>())
+const answer = ref('')
+const hint = ref<{ level: number; text: string; sources: Source[] }>()
+const skipConfirm = ref(false)
+const removeConfirm = ref(false)
+const correction = ref<{ attempt: Attempt; reason: string; key: string }>()
+const redoing = ref(false)
+let sequence = 0
+
+const currentKey = `learning-current:${props.userId}`
+const draftKey = (id: string) => `learning-draft:${props.userId}:${id}`
+const seenKey = (id: string) => `learning-feedback:${props.userId}:${id}`
+type RequestKey = { signature: string; key: string }
+let creation: RequestKey | undefined
+let submission: RequestKey | undefined
+let advancement: RequestKey | undefined
+let helpRequest: RequestKey | undefined
+function requestFor(signature: string, previous?: RequestKey) {
+  return previous?.signature === signature ? previous : { signature, key: crypto.randomUUID() }
+}
+
+const options = computed(() => props.documents.filter(doc => doc.knowledge_base_id === kbId.value))
+const chosen = computed(() => options.value.filter(doc => documentIds.value.includes(doc.id) && available(doc)).map(doc => doc.id))
+const ongoing = computed(() => summaries.value.filter(item => !['completed', 'failed'].includes(item.status)))
+const continueWith = computed(() => ongoing.value.find(item => item.id === readLocal(currentKey)) || ongoing.value[0])
+const running = computed(() => ['queued', 'running'].includes(feedback.value?.assessment_status || '') ||
+  (workspace.value?.jobs.some(job => ['queued', 'running'].includes(job.status)) ?? false))
+const planJob = computed(() => workspace.value?.jobs.find(job => job.kind !== 'assessment'))
+const assessmentJob = computed(() => workspace.value?.jobs.find(job => job.kind === 'assessment' && job.target_id === feedback.value?.id))
+const decision = computed(() => history.value?.decisions.find(item => item.trigger_attempt_id === feedback.value?.id && item.status !== 'superseded'))
+const currentCap = computed(() => workspace.value?.capabilities.find(cap => cap.id === task.value?.capability_id))
+const covered = computed(() => workspace.value?.capabilities.filter(cap => cap.coverage_status === 'covered') || [])
+function hasUsableSources(cap: Capability) {
+  return cap.source_ids.length > 0 && cap.source_ids.every(id => {
+    const source = workspace.value?.sources.find(item => item.id === id)
+    return source && !['unavailable', 'expired'].includes(source.state || '')
+  })
+}
+const unchecked = computed(() => covered.value.filter(cap => !reviewed.value.has(cap.id) || !hasUsableSources(cap)))
+const reviewedCount = computed(() => covered.value.length - unchecked.value.length)
+const canConfirm = computed(() => covered.value.length > 0 && !unchecked.value.length)
+const planBlocker = computed(() => {
+  if (workspace.value?.source_warning) return '来源已失效，请重新选择资料。'
+  if (!covered.value.length) return '尚无资料已覆盖的能力，请查看原文并编辑覆盖状态，或补充资料。'
+  if (covered.value.some(cap => !hasUsableSources(cap))) return '已覆盖的能力中有原文依据缺失或失效，请补充绑定或重新选择资料。'
+  return unchecked.value.length ? '请逐项查看原文依据并核对。' : ''
+})
+function focusUnchecked() {
+  const cap = unchecked.value[0] || workspace.value?.capabilities[0]
+  if (!cap) return
+  const element = document.getElementById('cap-' + cap.id)
+  element?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  element?.focus({ preventScroll: true })
+}
+const hintNames = ['提醒条件', '查看相关原文', '局部示例', '完整解析']
 const labels: Record<string, string> = { generating: '生成草稿中', draft: '待确认目标', active: '学习中', completed: '验证完成', needs_practice: '需要更多练习', failed: '待重试', queued: '排队中', running: '评价中', unverified: '尚未验证', needs_evidence: '需要补充证据', assisted: '帮助下完成', independent: '独立完成', transfer_verified: '变式验证通过', suspected: '疑似障碍', confirmed: '有重复证据', disputed: '判断有争议', resolved: '已有解除依据', met: '满足标准', partial: '部分满足', not_met: '尚未满足', insufficient_evidence: '证据不足', pending: '待完成', skipped: '已跳过', current: '当前版本', historical: '历史版本', expired: '已过期', unavailable: '来源不可用', stock_value_vs_order_count: '库存值与订单数混淆', interleaving: '交错执行理解', prevention: '防护方法不足', expression: '表达需要补充' }
 const name = (v: string) => labels[v] || v
-const draftKey = (id: string) => `learning-draft:${props.userId}:${id}`
-const currentCap = computed(() => workspace.value?.capabilities.find(c => c.id === task.value?.capability_id))
-const sourceName = (id: string) => { const s = workspace.value?.sources.find(s => s.id === id); return s ? `${s.document_name}${s.page ? ` · 第${s.page}页` : ''}` : '来源已不可用' }
-const requestKey = () => crypto.randomUUID()
-const time = (v: string) => new Date(v.endsWith('Z') ? v : v + 'Z').toLocaleString('zh-CN')
-function available(d: Document) { return !!d.active_revision_id && (!d.expires_at || new Date(/Z$|[+-]\d\d:\d\d$/.test(d.expires_at) ? d.expires_at : d.expires_at + 'Z').getTime() > Date.now()) }
-async function action(fn: () => Promise<void>) { if (busy.value) return; busy.value = true; error.value = ''; try { await fn() } catch (e) { error.value = e instanceof Error ? e.message : '操作失败'; } finally { busy.value = false } }
-async function list() { summaries.value = await learning.list() }
-async function loadTask(id: string) {
-  if (!id) { task.value = null; return }
-  const changed = task.value?.id !== id
-  const result = await learning.task(id)
-  if (disposed) return
-  task.value = result
-  if (changed) { answer.value = localStorage.getItem(draftKey(id)) || ''; hint.value = null }
+function sourceName(id: string) {
+  const source = workspace.value?.sources.find(item => item.id === id)
+  return source ? `${source.document_name}${source.page ? ` · 第 ${source.page} 页` : ''}` : '来源不可用'
 }
-async function refresh() {
-  const wid = workspace.value?.id
-  if (!wid) { await list(); return }
-  const [w, h] = await Promise.all([learning.get(wid), learning.history(wid)])
-  if (disposed || workspace.value?.id !== wid) return
-  workspace.value = w; history.value = h
-  await loadTask(selectedTaskId.value || w.current_task_id || '')
+
+async function list() {
+  summaries.value = await learning.list()
+  listLoaded.value = true
 }
-async function open(id: string) { await action(async () => { selectedTaskId.value = ''; task.value = null; hint.value = null; workspace.value = await learning.get(id); tab.value = 'task'; creating.value = false; await refresh() }) }
-async function create() { await action(async () => { const result = await learning.create({ knowledge_base_id: kbId.value, document_ids: documentIds.value, goal_text: goal.value, request_key: creationKey }); creationKey = crypto.randomUUID(); workspace.value = await learning.get(result.workspace_id); creating.value = false; selectedTaskId.value = ''; await refresh(); await list() }) }
-async function save(confirm = false) { await action(async () => { if (!workspace.value) return; workspace.value = await learning.save(workspace.value); if (confirm) workspace.value = await learning.confirm(workspace.value); message.value = confirm ? '学习目标已确认，可以开始初始任务。' : '草稿已保存。'; await refresh(); await list() }) }
-async function submit() { await action(async () => {
-  if (!task.value || !answer.value.trim()) return
-  const text = answer.value.trim(), id = task.value.id
-  if (!lastSubmission || lastSubmission.text !== text || lastSubmission.task !== id) lastSubmission = { text, task: id, key: crypto.randomUUID() }
-  await learning.submit(id, text, lastSubmission.key)
-  localStorage.removeItem(draftKey(id)); message.value = '作答已保存，正在按标准评价。'; await refresh()
-}) }
-async function help(level: number) { await action(async () => { if (!task.value) return; hint.value = await learning.hint(task.value.id, level, crypto.randomUUID()); task.value.hint_level = Math.max(task.value.hint_level, level) }) }
-async function review(id: string) { await action(async () => { selectedTaskId.value = id; await loadTask(id); tab.value = 'task' }) }
-async function showEvidence(taskId: string) { await action(async () => { selectedTaskId.value = taskId; await loadTask(taskId); hint.value = await learning.hint(taskId, 2, crypto.randomUUID()); if (task.value) task.value.hint_level = Math.max(task.value.hint_level, 2); tab.value = 'task' }) }
-async function next(skip: boolean) { await action(async () => { if (!workspace.value) return; workspace.value = await learning.next(workspace.value, skip); selectedTaskId.value = ''; await refresh() }) }
-async function retry(id: string) { await action(async () => { await learning.retry(id); await refresh() }) }
-async function correct() { await action(async () => { if (!workspace.value || !correction.value) return; workspace.value = await learning.correct(workspace.value, correction.value.attempt.id, correction.value.reason, correction.value.key); correction.value = null; selectedTaskId.value = ''; message.value = '争议已记录，原判定已暂停使用。请重新解释或作答以补充证据。'; await refresh() }) }
-async function remove() { await action(async () => { if (!workspace.value || !window.confirm('删除这个专题的学习记录？原始资料会保留。')) return; await learning.remove(workspace.value.id); workspace.value = null; task.value = null; await list() }) }
-async function copyPlan() { const w = workspace.value; if (!w) return; kbId.value = w.knowledge_base_id || ''; await nextTick(); documentIds.value = [...w.selected_document_ids]; goal.value = w.goal_text; creating.value = true }
-watch(workspace, w => { const key = `learning-current:${props.userId}`; if (w) localStorage.setItem(key, w.id); else localStorage.removeItem(key) })
-watch(kbId, () => { documentIds.value = [] })
-watch(answer, value => { if (task.value) localStorage.setItem(draftKey(task.value.id), value) })
-onMounted(() => { void action(async () => { await list(); const saved = localStorage.getItem(`learning-current:${props.userId}`); if (saved && summaries.value.some(w => w.id === saved)) { workspace.value = await learning.get(saved); await refresh() } }); timer = setInterval(async () => { if (polling || busy.value || !running.value || workspace.value?.status === 'draft') return; polling = true; try { await refresh(); await list() } catch (e) { error.value = e instanceof Error ? e.message : '状态更新失败' } finally { polling = false } }, 2000) })
-onUnmounted(() => { disposed = true; clearInterval(timer) })
+
+function setTask(next?: LearningTask) {
+  if (task.value?.id !== next?.id) {
+    answer.value = next ? readLocal(draftKey(next.id)) || '' : ''
+    hint.value = undefined
+  }
+  task.value = next
+}
+
+function editAnswer(event: Event) {
+  answer.value = (event.target as HTMLTextAreaElement).value
+  if (task.value) writeLocal(draftKey(task.value.id), answer.value)
+}
+
+function openFeedback(attempt: Attempt, shownTask?: LearningTask) {
+  recommendedTask.value = undefined
+  feedback.value = attempt
+  feedbackTask.value = shownTask
+  historical.value = undefined
+  hint.value = undefined
+  redoing.value = false
+  tab.value = 'task'
+  record('learning_feedback_opened', { status: attempt.assessment_status, hint_level: attempt.hint_level_at_submit })
+}
+
+async function readWorkspace(id: string, enter = false, ticket = sequence) {
+  const [next, records] = await Promise.all([learning.get(id), learning.history(id)])
+  const attempt = feedback.value && workspace.value?.id === id
+    ? records.attempts.find(item => item.id === feedback.value?.id)
+    : enter ? records.attempts.find(item => !item.invalidated && item.id !== readLocal(seenKey(id))) : undefined
+  const latest = records.attempts[0]
+  const show = enter ? (attempt?.id === latest?.id ? attempt : undefined) : attempt
+  const taskId = show?.task_id || (!enter && redoing.value ? task.value?.id : next.current_task_id)
+  const nextTask = taskId ? await learning.task(taskId) : undefined
+  if (ticket !== sequence) return
+  if (enter) {
+    feedback.value = undefined
+    feedbackTask.value = undefined
+    historical.value = undefined
+    hint.value = undefined
+    redoing.value = false
+  }
+  workspace.value = next
+  history.value = records
+  if (show) {
+    if (enter) openFeedback(show, nextTask)
+    else { feedback.value = show; feedbackTask.value = nextTask }
+  } else if (!feedback.value) setTask(nextTask)
+  recommendedTask.value = undefined
+  if (show?.assessment_status === 'completed' && next.current_task_id && next.current_task_id !== show.task_id && !next.source_warning) {
+    try {
+      const recommendation = await learning.task(next.current_task_id)
+      if (ticket === sequence && !recommendation.restricted) recommendedTask.value = recommendation
+    } catch { /* The saved feedback remains usable while the recommendation can be retried. */ }
+  }
+  if (next.source_warning) hint.value = undefined
+}
+
+async function update() {
+  const id = workspace.value?.id
+  if (id) await readWorkspace(id)
+  else await list()
+}
+
+async function action(fn: () => Promise<void>) {
+  if (busy.value) return
+  sequence += 1
+  busy.value = true
+  error.value = ''
+  notice.value = ''
+  try { await fn() }
+  catch (reason) {
+    error.value = errorText(reason)
+    if (reason instanceof ApiError && [403, 409, 410].includes(reason.status) && workspace.value) {
+      try { await readWorkspace(workspace.value.id); reviewed.value.clear(); error.value += ' 已读取最新状态，请核对后继续。' }
+      catch { error.value += ' 可重试读取最新状态。' }
+    }
+  } finally { busy.value = false }
+}
+
+async function savedRefresh(id: string) {
+  try { await readWorkspace(id) }
+  catch { notice.value += ' 状态暂未刷新，可重试读取。' }
+}
+
+function open(id: string) {
+  return action(async () => {
+    await readWorkspace(id, true)
+    if (!workspace.value) return
+    writeLocal(currentKey, id)
+    reviewed.value.clear()
+    creating.value = false
+    tab.value = 'task'
+  })
+}
+
+function back() {
+  return action(async () => {
+    workspace.value = undefined
+    setTask()
+    feedback.value = undefined
+    feedbackTask.value = undefined
+    historical.value = undefined
+    redoing.value = false
+    await list()
+  })
+}
+
+function beginCreate(template?: Workspace, reselect = false) {
+  error.value = ''
+  notice.value = ''
+  if (template) {
+    kbId.value = props.knowledgeBases.some(base => base.id === template.knowledge_base_id) ? template.knowledge_base_id! : ''
+    goal.value = template.goal_text
+    documentIds.value = reselect ? [] : [...template.selected_document_ids]
+  } else if (!kbId.value && props.knowledgeBases.length === 1) kbId.value = props.knowledgeBases[0]!.id
+  creating.value = true
+}
+
+function create() {
+  return action(async () => {
+    if (!chosen.value.length || chosen.value.length > 10 || goal.value.trim().length < 10) return
+    const body = { knowledge_base_id: kbId.value, document_ids: chosen.value, goal_text: goal.value.trim() }
+    creation = requestFor(JSON.stringify(body), creation)
+    const result = await learning.create({ ...body, request_key: creation.key })
+    notice.value = '专题已创建。'
+    try { await readWorkspace(result.workspace_id, true) }
+    catch { notice.value += ' 状态暂未刷新，再次提交会打开同一个专题。'; return }
+    creation = undefined
+    writeLocal(currentKey, result.workspace_id)
+    creating.value = false
+    tab.value = 'task'
+    reviewed.value.clear()
+    notice.value = '专题已创建，正在准备能力草稿。'
+  })
+}
+
+function save(confirm = false) {
+  return action(async () => {
+    if (!workspace.value || (confirm && !canConfirm.value)) return
+    workspace.value = await learning.save(workspace.value)
+    notice.value = '草稿已保存。'
+    if (confirm) {
+      workspace.value = await learning.confirm(workspace.value)
+      notice.value = '目标已确认。'
+      await savedRefresh(workspace.value.id)
+    }
+  })
+}
+
+function submit() {
+  return action(async () => {
+    const current = task.value
+    const w = workspace.value
+    const text = answer.value.trim()
+    if (!current || !w || !text || text.length > 10000 || current.restricted || w.source_warning) return
+    submission = requestFor(JSON.stringify([current.id, text]), submission)
+    const result = await learning.submit(current.id, text, submission.key)
+    openFeedback(result, current)
+    removeLocal(draftKey(current.id))
+    answer.value = ''
+    submission = undefined
+    notice.value = '作答已保存。'
+    await savedRefresh(w.id)
+  })
+}
+
+function continueToTask() {
+  return action(async () => {
+    const w = workspace.value
+    const a = feedback.value
+    if (!w || !a) return
+    const latest = await learning.get(w.id)
+    const nextTask = latest.current_task_id ? await learning.task(latest.current_task_id) : undefined
+    workspace.value = latest
+    writeLocal(seenKey(w.id), a.id)
+    feedback.value = undefined
+    feedbackTask.value = undefined
+    setTask(nextTask)
+  })
+}
+
+function review(attempt: Attempt) {
+  return action(async () => {
+    const [latest, oldTask] = await Promise.all([learning.attempt(attempt.id), learning.task(attempt.task_id)])
+    historical.value = { attempt: latest, task: oldTask }
+  })
+}
+
+function redo(oldTask: LearningTask) {
+  if (oldTask.restricted || !workspace.value || workspace.value.source_warning) return
+  if (feedback.value) writeLocal(seenKey(workspace.value.id), feedback.value.id)
+  feedback.value = undefined
+  feedbackTask.value = undefined
+  historical.value = undefined
+  redoing.value = true
+  tab.value = 'task'
+  setTask(oldTask)
+}
+
+function help(level: number, id = task.value?.id) {
+  return action(async () => {
+    if (!id) return
+    helpRequest = requestFor(JSON.stringify([id, level]), helpRequest)
+    hint.value = await learning.hint(id, level, helpRequest.key)
+    helpRequest = undefined
+    if (task.value?.id === id) task.value.hint_level = Math.max(task.value.hint_level, level)
+  })
+}
+
+async function advance(skip: boolean) {
+  const w = workspace.value
+  if (!w) return
+  sequence += 1
+  advancement = requestFor(JSON.stringify([w.id, w.state_version, skip]), advancement)
+  try { workspace.value = await learning.next(w, skip, advancement.key) }
+  catch (reason) {
+    if (reason instanceof ApiError && reason.status === 409) {
+      await readWorkspace(w.id)
+      throw new Error('学习状态已变化，请关闭此窗口并核对当前任务。')
+    }
+    throw reason
+  }
+  redoing.value = false
+  advancement = undefined
+  notice.value = skip ? '已跳过本题。' : '已检查下一步。'
+  await savedRefresh(w.id)
+}
+
+function retry(id: string) {
+  return action(async () => {
+    if (!workspace.value) return
+    const updated = await learning.retry(id)
+    workspace.value.jobs = workspace.value.jobs.map(job => job.id === id ? updated : job)
+    if (feedback.value && updated.target_id === feedback.value.id) feedback.value.assessment_status = 'queued'
+    notice.value = '已重新提交原任务。'
+    await savedRefresh(workspace.value.id)
+  })
+}
+
+function correct() {
+  return action(async () => {
+    if (!workspace.value || !correction.value) return
+    const item = correction.value
+    workspace.value = await learning.correct(workspace.value, item.attempt.id, item.reason, item.key)
+    correction.value = undefined
+    feedback.value = undefined
+    historical.value = undefined
+    redoing.value = false
+    tab.value = 'task'
+    notice.value = '争议已记录，该次评价已停止影响后续推荐。'
+    await savedRefresh(workspace.value.id)
+  })
+}
+
+async function remove() {
+  const id = workspace.value?.id
+  if (!id) return
+  await learning.remove(id)
+  summaries.value = summaries.value.filter(item => item.id !== id)
+  if (readLocal(currentKey) === id) removeLocal(currentKey)
+  await back()
+  notice.value = error.value ? '专题已删除，列表暂未刷新。' : '专题已删除。'
+}
+
+function feedbackTitle(a: Attempt) {
+  if (a.invalidated) return '此评价已记录争议'
+  if (a.assessment_status === 'failed') return '评价失败'
+  if (a.assessment_status === 'running' || (feedback.value?.id === a.id && assessmentJob.value?.status === 'running')) return '正在评价'
+  if (a.assessment_status !== 'completed') return '等待评价'
+  return a.assessment.criteria?.length ? '本次评价' : '来源不可用，评价已隐藏'
+}
+
+function download(source: Source) {
+  return action(async () => {
+    if (source.document_id) await downloadDocument(source.document_id, source.document_name, source.revision_id)
+  })
+}
+
+function dispute(attempt: Attempt) {
+  historical.value = undefined
+  correction.value = { attempt, reason: '', key: crypto.randomUUID() }
+}
+
+useVisiblePolling(toRef(props, 'active'), () => running.value, async () => {
+  if (busy.value || creating.value || skipConfirm.value || removeConfirm.value || correction.value || workspace.value?.status === 'draft') return
+  const ticket = sequence
+  try { await update() }
+  catch (reason) { if (ticket === sequence) error.value = errorText(reason) }
+})
+onMounted(() => { void action(list) })
 </script>
 
 <template>
   <main class="page learning-page">
-    <div class="page-heading"><div><span class="eyebrow">LEARN WITH A PURPOSE</span><h1>专题学习<span class="heading-dot">.</span></h1><p>围绕一个目标，用真实作答决定下一步。</p></div><div class="learning-actions"><button class="btn secondary" :disabled="busy" @click="action(refresh)"><RefreshCw :size="16" />刷新</button><button class="btn primary" @click="creating = true; message = ''"><Plus :size="16" />新建专题</button></div></div>
-    <div v-if="error" class="alert error-alert" role="alert">{{ error }}</div>
-    <p v-if="message" class="learning-notice" role="status">{{ message }}</p>
-    <p v-if="!modelReady" class="learning-notice">尚未配置评价模型。可以核对资料、确认模板目标并保存作答，自动评价需配置模型后重试。</p>
+    <div class="page-heading">
+      <h1>专题学习</h1>
+      <button v-if="!creating && !workspace && summaries.length" class="btn secondary" :disabled="busy" @click="beginCreate()">新建专题</button>
+    </div>
+    <p v-if="error" class="alert error-alert" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="action(update)">重试读取</button></p>
+    <p v-if="notice" class="workspace-notice" role="status">{{ notice }}</p>
 
-    <section v-if="creating" class="panel learning-create">
-      <div class="section-heading"><h2>建立学习目标</h2><button class="text-button" @click="creating = false">取消</button></div>
-      <p class="muted">这一版先支持数据库事务专题。选择真实资料后，系统生成三个能力草稿；正式练习采用固定模板。</p>
-      <form @submit.prevent="create"><label>知识库<select v-model="kbId" required><option value="" disabled>选择个人知识库</option><option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</option></select></label>
-        <label>学习目标<textarea v-model="goal" rows="3" minlength="10" maxlength="1000" required /></label>
-        <fieldset><legend>选择资料（最多 10 份）</legend><p v-if="!options.length" class="muted">请先在知识空间上传资料并等待解析完成。</p><label v-for="doc in options" :key="doc.id" class="learning-check"><input v-model="documentIds" type="checkbox" :value="doc.id" :disabled="!available(doc) || (!documentIds.includes(doc.id) && documentIds.length >= 10)" /><span>{{ doc.name }} <small v-if="!available(doc)">尚不可用或已过期</small></span></label></fieldset>
-        <button class="btn primary" :disabled="busy || !documentIds.length || goal.trim().length < 10"><LoaderCircle v-if="busy" class="spin" :size="16" />生成能力草稿<ArrowRight :size="16" /></button>
+    <section v-if="creating" class="panel learning-panel">
+      <div class="section-heading"><h2>建立学习目标</h2><button class="text-button" :disabled="busy" @click="creating = false">取消</button></div>
+      <p>当前支持数据库事务专题。从一个知识库选择 1–10 份可用资料。</p>
+      <form class="action-stack" @submit.prevent="create">
+        <label>知识库
+          <select v-model="kbId" required :disabled="busy" @change="documentIds = []">
+            <option value="" disabled>选择个人知识库</option>
+            <option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+          </select>
+        </label>
+        <label>学习目标<textarea v-model="goal" rows="3" minlength="10" maxlength="1000" :disabled="busy" required /></label>
+        <fieldset>
+          <legend>选择资料</legend>
+          <p v-if="!options.some(available)">当前库没有可用资料。 <button class="text-button" type="button" @click="emit('upload', kbId)">上传资料</button></p>
+          <label v-for="doc in options" :key="doc.id" class="check-label">
+            <input v-model="documentIds" type="checkbox" :value="doc.id"
+              :disabled="busy || !available(doc) || (!documentIds.includes(doc.id) && chosen.length >= 10)" />
+            <span>{{ doc.name }} <small v-if="!available(doc)">· 尚不可用或已过期</small></span>
+          </label>
+        </fieldset>
+        <button class="btn primary" :disabled="busy || !chosen.length || goal.trim().length < 10">{{ busy ? '正在提交…' : '生成能力草稿' }}</button>
       </form>
     </section>
 
     <template v-else-if="workspace">
-      <div class="learning-toolbar"><button class="text-button" @click="workspace = null; task = null; action(list)"><ChevronLeft :size="16" />全部专题</button><span class="outline-chip">{{ name(workspace.status) }}</span><button class="text-button" @click="copyPlan">按此目标新建草稿</button><button class="icon-button" aria-label="删除专题" @click="remove"><Trash2 :size="16" /></button></div>
+      <div class="inline-actions">
+        <button class="text-button" :disabled="busy" @click="back">返回全部专题</button>
+        <span class="outline-chip">{{ name(workspace.status) }}</span>
+        <details>
+          <summary>专题更多操作</summary>
+          <div class="action-stack">
+            <button class="text-button" :disabled="busy" @click="beginCreate(workspace)">以此为模板</button>
+            <button class="text-button danger-button" :disabled="busy" @click="removeConfirm = true">删除专题</button>
+          </div>
+        </details>
+      </div>
       <h2 class="learning-goal">{{ workspace.goal_text }}</h2>
-      <p v-if="workspace.source_warning" class="alert error-alert">{{ workspace.source_warning }}</p>
-      <div v-for="job in workspace.jobs.filter(j => ['queued', 'running', 'failed'].includes(j.status))" :key="job.id" class="learning-job panel"><LoaderCircle v-if="job.status !== 'failed'" class="spin" :size="16" /><Clock3 v-else :size="16" /><div><strong>{{ job.stage }}</strong><p v-if="job.error">{{ job.error }}</p></div><button v-if="job.status === 'failed'" class="btn secondary" :disabled="busy || running" @click="retry(job.id)">重试</button></div>
+      <div v-if="workspace.source_warning" class="alert error-alert" role="alert">
+        {{ workspace.source_warning }} <button class="text-button" :disabled="busy" @click="beginCreate(workspace, true)">重新选择资料</button>
+      </div>
 
-      <section v-if="workspace.status === 'draft'" class="learning-plan">
-        <p class="learning-notice">请核对能力与原文。标记“资料已覆盖”表示你确认这些片段能支持该能力及练习；缺口部分不会生成计分任务。</p>
-        <article v-for="cap in workspace.capabilities" :key="cap.id" class="panel learning-cap-edit"><span class="eyebrow">能力 {{ cap.ordinal + 1 }}</span><label>能力名称<input v-model="cap.title" maxlength="200" /></label><label>可验证的产出<textarea v-model="cap.observable_outcome" rows="2" maxlength="2000" /></label><label>资料覆盖<select v-model="cap.coverage_status"><option value="covered">资料已覆盖（已核对）</option><option value="partial">部分覆盖 / 待核对</option><option value="missing">缺少依据</option></select></label>
-          <details><summary>先修关系与原文依据</summary><fieldset><legend>先修能力</legend><label v-for="prior in workspace.capabilities.filter(c => c.id !== cap.id)" :key="prior.id" class="learning-check"><input v-model="cap.prerequisite_ids" type="checkbox" :value="prior.id" />{{ prior.title }}</label></fieldset><label v-for="source in workspace.sources" :key="source.id" class="learning-check learning-source"><input v-model="cap.source_ids" type="checkbox" :value="source.id" /><span><strong>{{ sourceName(source.id) }}</strong><small>{{ name(source.state || '') }}</small><blockquote>{{ source.excerpt }}</blockquote></span></label><p v-if="!workspace.sources.length">没有找到匹配片段，请补充资料后重新创建草稿。</p></details>
-        </article>
-        <div class="learning-actions"><button class="btn secondary" :disabled="busy" @click="save(false)">保存草稿</button><button class="btn primary" :disabled="busy" @click="save(true)"><Check :size="16" />确认目标并开始</button></div>
+      <section v-if="workspace.status === 'generating' || workspace.status === 'failed'" class="panel learning-panel">
+        <h3>{{ name(workspace.status) }}</h3>
+        <p v-if="planJob?.error">{{ planJob.error }}</p>
+        <button v-if="planJob?.status === 'failed'" class="btn primary" :disabled="busy" @click="retry(planJob.id)">重试生成草稿</button>
       </section>
 
-      <template v-if="visibleTask">
-        <div class="learning-tabs"><button :class="{ active: tab === 'task' }" @click="tab = 'task'">当前学习</button><button :class="{ active: tab === 'history' }" @click="tab = 'history'">作答与调整记录</button></div>
-        <div v-if="tab === 'task'" class="learning-layout">
-          <aside class="panel learning-capabilities"><h3><Target :size="18" />能力目标</h3><article v-for="cap in workspace.capabilities" :key="cap.id" :class="{ active: cap.id === task?.capability_id }"><strong>{{ cap.ordinal + 1 }}. {{ cap.title }}</strong><p>{{ cap.observable_outcome }}</p><span class="outline-chip">{{ name(cap.state) }}</span><small v-if="cap.coverage_status !== 'covered'">资料存在缺口</small></article><div v-for="o in workspace.obstacles" :key="o.id" class="learning-obstacle"><strong>{{ name(o.status) }}</strong><p>{{ name(o.obstacle_code) }}</p><small>{{ o.evidence_refs.length }} 条作答依据</small></div></aside>
-          <section class="panel learning-task">
-            <template v-if="task"><div class="section-heading"><span class="eyebrow">{{ task.template_id }} · {{ currentCap?.title }}</span><button v-if="selectedTaskId" class="text-button" @click="selectedTaskId = ''; action(refresh)">返回当前任务</button></div><h3>本次需要完成的产出</h3><p class="learning-prompt">{{ task.prompt }}</p><details><summary>评价标准</summary><ol><li v-for="criterion in task.rubric" :key="criterion.id">{{ criterion.description }}</li></ol></details><p class="muted">本题已获得的最高帮助：{{ task.hint_level }} 级。未使用系统帮助不代表未查阅外部资料。</p><label>你的分析<textarea v-model="answer" rows="9" maxlength="10000" placeholder="写下推理过程。草稿会保留在当前浏览器。" :disabled="task.restricted" /></label><div class="learning-actions"><button class="btn primary" :disabled="busy || running || task.restricted || !answer.trim()" @click="submit"><LoaderCircle v-if="running" class="spin" :size="16" />{{ running ? '评价处理中' : '提交作答' }}</button><button v-if="!selectedTaskId" class="btn secondary" :disabled="busy || running" @click="next(true)">跳过（不记为通过）</button></div></template>
-            <template v-else><BookOpen :size="30" /><h3>{{ workspace.status === 'completed' ? '本专题的变式验证已完成' : '暂时没有可用的下一题' }}</h3><p>可以回看记录。若资料或题目不足，请补充资料并新建草稿；跳过不代表已经掌握。</p><button v-if="workspace.status !== 'completed'" class="btn secondary" :disabled="busy" @click="next(false)">检查下一步</button></template>
-          </section>
-          <aside v-if="task" class="panel learning-help"><h3><Lightbulb :size="18" />按需获得帮助</h3><p class="muted">每次请求都会记录，完整解析后的完成将与独立作答区分。</p><button v-for="(label, index) in ['提醒条件', '查看相关原文', '局部示例', '完整解析']" :key="label" class="btn secondary" :disabled="busy || task.restricted" @click="help(index + 1)">{{ index + 1 }} · {{ label }}</button><div v-if="hint" class="learning-hint"><strong>第 {{ hint.level }} 级帮助</strong><p>{{ hint.text }}</p><div v-for="source in hint.sources" :key="source.id"><strong>{{ sourceName(source.id) }}</strong><blockquote>{{ source.excerpt }}</blockquote><button v-if="source.document_id" class="text-button" @click="action(async () => { if (source.document_id) await downloadDocument(source.document_id, source.document_name, source.revision_id) })">下载任务采用的原文版本</button></div></div></aside>
+      <section v-else-if="workspace.status === 'draft'" class="learning-plan">
+        <p>核对每项正式练习所需的资料。部分覆盖或缺少依据的能力会保留原覆盖状态。</p>
+        <article v-for="cap in workspace.capabilities" :id="'cap-' + cap.id" :key="cap.id" class="panel learning-panel" tabindex="-1">
+          <h3>{{ cap.title }}</h3>
+          <p><strong>你将能做什么</strong> {{ cap.observable_outcome }}</p>
+          <p class="muted">{{ { covered: '资料已覆盖', partial: '部分覆盖', missing: '缺少依据' }[cap.coverage_status] || cap.coverage_status }} · {{ cap.source_ids.length }} 段依据</p>
+          <details class="bound-sources">
+            <summary>查看原文依据</summary>
+            <p v-if="!cap.source_ids.length">尚未绑定依据，请从编辑入口选择原文。</p>
+            <article v-for="id in cap.source_ids" :key="id" class="source-card">
+              <strong>{{ sourceName(id) }}</strong>
+              <p>{{ name(workspace.sources.find(source => source.id === id)?.state || 'unavailable') }}</p>
+              <blockquote>{{ workspace.sources.find(source => source.id === id)?.excerpt }}</blockquote>
+            </article>
+          </details>
+          <details @change="reviewed.delete(cap.id)">
+            <summary>编辑目标与依据</summary>
+            <div class="action-stack">
+              <label>能力名称<input v-model="cap.title" maxlength="200" :disabled="busy" @input="reviewed.delete(cap.id)" /></label>
+              <label>可验证的产出<textarea v-model="cap.observable_outcome" rows="2" maxlength="2000" :disabled="busy" @input="reviewed.delete(cap.id)" /></label>
+              <label>资料覆盖
+                <select v-model="cap.coverage_status" :disabled="busy">
+                  <option value="covered">资料已覆盖</option><option value="partial">部分覆盖</option><option value="missing">缺少依据</option>
+                </select>
+              </label>
+              <fieldset>
+                <legend>先修能力</legend>
+                <label v-for="prior in workspace.capabilities.filter(item => item.id !== cap.id)" :key="prior.id" class="check-label">
+                  <input v-model="cap.prerequisite_ids" type="checkbox" :value="prior.id" :disabled="busy" />{{ prior.title }}
+                </label>
+              </fieldset>
+              <fieldset>
+                <legend>原文依据</legend>
+                <label v-for="source in workspace.sources" :key="source.id" class="check-label">
+                  <input v-model="cap.source_ids" type="checkbox" :value="source.id" :disabled="busy" />
+                  <span><strong>{{ sourceName(source.id) }}</strong> · {{ name(source.state || '') }}<blockquote>{{ source.excerpt }}</blockquote></span>
+                </label>
+              </fieldset>
+            </div>
+          </details>
+          <label v-if="cap.coverage_status === 'covered'" class="check-label">
+            <input v-model="reviewed" type="checkbox" :value="cap.id" :disabled="busy" />已核对此项能力及其原文依据
+          </label>
+        </article>
+        <p role="status">已核对 {{ reviewedCount }} / {{ covered.length }} 项
+          <button v-if="!canConfirm" class="text-button" @click="focusUnchecked">查看待核对项</button>
+        </p>
+        <p v-if="planBlocker" class="workspace-notice">{{ planBlocker }}
+          <button v-if="workspace.source_warning || !covered.length || covered.some(cap => !hasUsableSources(cap))" class="text-button" :disabled="busy" @click="beginCreate(workspace, true)">重新选择资料</button>
+        </p>
+        <div class="inline-actions">
+          <button class="btn primary" :disabled="busy || !canConfirm || !!workspace.source_warning" @click="save(true)">确认目标并开始</button>
+          <button class="btn secondary" :disabled="busy || !!workspace.source_warning" @click="save()">保存草稿</button>
         </div>
-        <section v-if="history" class="learning-feedback">
-          <h3>{{ tab === 'task' ? '最近一次提交与下一步依据' : '学习记录' }}</h3>
-          <article v-for="a in (tab === 'task' ? history.attempts.slice(0, 1) : history.attempts)" :key="a.id" class="panel learning-attempt"><div class="section-heading"><strong>{{ time(a.submitted_at) }} · {{ name(a.assessment_status) }}</strong><span class="outline-chip">{{ a.hint_level_at_submit ? `${a.hint_level_at_submit} 级帮助下作答` : '未使用系统帮助' }}</span></div><p v-if="a.invalidated" class="learning-notice">此评价已被提出争议，不再用于能力和任务调整。</p><details><summary>查看提交原文</summary><pre>{{ a.answer_text }}</pre></details><p>{{ a.assessment.feedback || (a.assessment_status === 'completed' ? '来源不可用，评价内容已隐藏。' : '作答已保存，等待有效评价。') }}</p><div v-for="c in a.assessment.criteria || []" :key="c.criterion_id" class="learning-criterion"><strong>{{ c.criterion_id }} · {{ name(c.verdict) }}</strong><blockquote v-for="(q, i) in c.student_evidence" :key="i">{{ q.quote }}</blockquote><p>{{ c.reason }}</p><button class="text-button learning-evidence-link" @click="showEvidence(a.task_id)">原文依据：{{ c.source_ids.map(sourceName).join('；') }}（查看会记录第 2 级帮助）</button></div><p v-for="o in a.assessment.obstacle_candidates || []" :key="o.code" class="muted">疑似：{{ name(o.code) }}。其他解释：{{ o.alternative_explanation }}</p><div class="learning-actions"><button class="text-button" :disabled="busy" @click="review(a.task_id)">查看任务 / 再次作答</button><button v-if="a.assessment_status === 'completed' && !a.invalidated && a.assessment.criteria?.length" class="text-button" :disabled="running" @click="correction = { attempt: a, reason: '', key: requestKey() }">我不同意这个判断</button></div></article>
-          <article v-for="d in (tab === 'task' ? history.decisions.slice(0, 1) : history.decisions)" :key="d.id" class="panel learning-decision"><span class="eyebrow">{{ d.kind === 'correction' ? '用户纠正' : '下一步调整' }} · {{ d.rule_version }}</span><p>{{ d.reason }}</p><small>{{ d.status === 'superseded' ? '已被纠正后的判断替代' : `${d.evidence_refs.length} 条提交依据` }}</small></article>
-          <details v-if="tab === 'history'"><summary>提示使用记录（最近 50 条）</summary><p v-for="h in history.hints" :key="h.id">{{ time(h.revealed_at) }} · 第 {{ h.level }} 级帮助</p></details>
+      </section>
+
+      <template v-else>
+        <div class="learning-tabs" aria-label="专题内容">
+          <button :class="{ active: tab === 'task' }" @click="tab = 'task'">{{ feedback ? '本次反馈' : '当前任务' }}</button>
+          <button :class="{ active: tab === 'history' }" @click="tab = 'history'; hint = undefined">学习记录</button>
+        </div>
+
+        <section v-if="tab === 'history'" class="panel learning-panel">
+          <h3>学习记录</h3>
+          <p v-if="!history?.attempts.length">还没有作答记录。</p>
+          <div v-for="item in history?.attempts" :key="item.id" class="history-row">
+            <span>{{ dateText(item.submitted_at) }} · {{ name(item.assessment_status) }}</span>
+            <button class="text-button" :disabled="busy" @click="review(item)">回看作答</button>
+          </div>
+          <details v-if="history?.decisions.length || history?.hints.length">
+            <summary>调整依据与帮助记录</summary>
+            <p v-for="item in history?.decisions" :key="item.id">{{ item.reason }}</p>
+            <p v-for="item in history?.hints" :key="item.id">{{ dateText(item.revealed_at) }} · 第 {{ item.level }} 级帮助</p>
+          </details>
+          <button class="text-button" @click="tab = 'task'">返回当前任务</button>
+        </section>
+
+        <section v-else-if="feedback" class="panel learning-panel">
+          <LearningFeedback :attempt="feedback" :task="feedbackTask" :title="feedbackTitle(feedback)" :reason="decision?.reason"
+            :source-name="sourceName" :show-actions="!busy && !running && !workspace.source_warning"
+            @evidence="help(2, feedback.task_id)" @dispute="dispute(feedback)" />
+          <LearningHint v-if="hint" :hint="hint" @download="download" />
+          <p v-if="assessmentJob?.error" class="alert error-alert">{{ assessmentJob.error }}</p>
+          <button v-if="assessmentJob?.status === 'failed'" class="btn primary" :disabled="busy || running || !!workspace.source_warning"
+            @click="retry(assessmentJob.id)">重试原评价</button>
+          <button v-else-if="feedback.assessment_status === 'completed' || feedback.invalidated" class="btn primary"
+            :disabled="busy || running" @click="continueToTask">{{ recommendedTask ? '继续下一题' : '返回当前进度' }}</button>
+          <p v-if="!modelReady">评价模型未配置，请由部署者配置后重试原评价。本次作答已保留。</p>
+        </section>
+
+        <section v-else-if="task" class="panel learning-panel">
+          <div class="section-heading">
+            <h3>{{ currentCap?.title || '当前任务' }}</h3>
+            <small>{{ workspace.tasks.filter(item => item.status === 'completed').length }} / {{ workspace.tasks.length }} 题已完成</small>
+          </div>
+          <p class="learning-text">{{ task.prompt }}</p>
+          <details v-if="task.rubric.length">
+            <summary>评价要求</summary>
+            <ul><li v-for="item in task.rubric" :key="item.id">{{ item.description }}</li></ul>
+          </details>
+          <p v-if="!modelReady" class="muted">评价模型未配置，仍可保存作答。</p>
+          <form class="action-stack" @submit.prevent="submit">
+            <label>你的作答<textarea :value="answer" rows="8" maxlength="10000" :disabled="busy || task.restricted || !!workspace.source_warning"
+              placeholder="草稿会保存在当前浏览器。" @input="editAnswer" /></label>
+            <div class="inline-actions">
+              <button class="btn primary" :disabled="busy || running || task.restricted || !!workspace.source_warning || !answer.trim()">提交作答</button>
+              <details v-if="!redoing"><summary>更多</summary><button class="text-button" type="button" :disabled="busy || running || !!workspace.source_warning" @click="skipConfirm = true">跳过</button></details>
+              <button v-else class="text-button" type="button" :disabled="busy" @click="redoing = false; action(update)">返回当前任务</button>
+            </div>
+          </form>
+          <details class="task-help">
+            <summary>需要提示{{ task.hint_level ? `（当前第 ${task.hint_level} 级）` : '' }}</summary>
+            <p>查看原文会记录为第 2 级帮助。阅读完整解析后的作答会按有帮助的口径评价。</p>
+            <div class="inline-actions">
+              <button v-for="(label, index) in hintNames" :key="label" class="btn secondary"
+                :disabled="busy || task.restricted || !!workspace.source_warning" @click="help(index + 1)">{{ index + 1 }} · {{ label }}</button>
+            </div>
+            <LearningHint v-if="hint" :hint="hint" @download="download" />
+          </details>
+        </section>
+
+        <section v-else class="panel learning-panel">
+          <h3>{{ workspace.status === 'completed' ? '本专题已完成' : '暂时没有可用题目' }}</h3>
+          <p>可在学习记录中回看作答和任务调整。</p>
+          <button v-if="workspace.status !== 'completed' && !workspace.source_warning" class="btn secondary" :disabled="busy || running"
+            @click="action(() => advance(false))">检查下一步</button>
         </section>
       </template>
     </template>
 
-    <section v-else class="learning-list"><div v-if="!summaries.length" class="panel learning-empty"><Target :size="38" /><h2>从一个具体目标开始</h2><p>选择事务教材与课程笔记，通过解释、场景分析和实践方案，逐步验证你能做什么。</p><button class="btn primary" @click="creating = true">创建第一个专题<ArrowRight :size="16" /></button></div><button v-for="w in summaries" :key="w.id" class="panel learning-summary" @click="open(w.id)"><span class="stat-icon teal"><Target :size="22" /></span><span><strong>{{ w.goal_text }}</strong><small>{{ name(w.status) }} · {{ time(w.updated_at) }}</small></span><ArrowRight :size="18" /></button></section>
+    <section v-else class="panel learning-panel">
+      <p v-if="!listLoaded && !error" role="status">正在读取专题…</p>
+      <template v-if="listLoaded">
+        <div v-if="continueWith" class="section-heading">
+          <h2>{{ continueWith.goal_text }}</h2>
+          <button class="btn primary" :disabled="busy" @click="open(continueWith.id)">继续学习</button>
+        </div>
+        <div v-if="!summaries.length">
+          <h2>从一个具体目标开始</h2><p>选择资料，练习解释和分析数据库事务场景。</p>
+          <button class="btn primary" :disabled="busy" @click="beginCreate()">新建专题</button>
+        </div>
+        <ul v-else class="workspace-list">
+          <li v-for="item in summaries" :key="item.id" class="history-row">
+            <button class="text-button" :disabled="busy" @click="open(item.id)">{{ item.goal_text }}</button><small>{{ name(item.status) }}</small>
+          </li>
+        </ul>
+      </template>
+    </section>
 
-    <div v-if="correction" class="modal-backdrop" @click.self="correction = null"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="correction-title"><h2 id="correction-title">纠正这次评价</h2><p>记录争议后，此次评价将停止影响能力和推荐。你可以重新作答，补充澄清证据。</p><label>哪里需要纠正<textarea v-model="correction.reason" rows="4" maxlength="1000" placeholder="例如：我理解订单数，但在回答里省略了说明。" /></label><div class="modal-actions"><button class="btn secondary" @click="correction = null">取消</button><button class="btn primary" :disabled="busy || !correction.reason.trim()" @click="correct">记录争议并重新验证</button></div></section></div>
+    <ConfirmAction v-if="skipConfirm" title="跳过本题" description="这题会被记为跳过，不计为通过。本地草稿会保留。"
+      label="确认跳过" :action="() => advance(true)" @close="skipConfirm = false" />
+    <ConfirmAction v-if="removeConfirm" title="删除专题" description="会删除专题、作答和评价记录，资料库中的原始资料会保留。删除无法撤销。"
+      :action="remove" @close="removeConfirm = false" />
+    <WorkspaceDialog v-if="historical" title="历史作答" drawer @close="historical = undefined">
+      <button autofocus class="text-button" @click="historical = undefined; tab = 'task'">返回当前任务</button>
+      <LearningFeedback :attempt="historical.attempt" :task="historical.task" :title="feedbackTitle(historical.attempt)" :source-name="sourceName" />
+      <div class="inline-actions">
+        <button v-if="historical.task.status === 'completed' && !historical.task.restricted && !workspace?.source_warning" class="btn secondary"
+          :disabled="busy || running" @click="redo(historical.task)">再次作答</button>
+        <button v-if="historical.attempt.assessment.criteria?.length && !historical.attempt.invalidated" class="text-button"
+          :disabled="busy || running" @click="dispute(historical.attempt)">我不同意这个判断</button>
+      </div>
+    </WorkspaceDialog>
+    <WorkspaceDialog v-if="correction" title="记录对评价的争议" :busy="busy" @close="correction = undefined">
+      <form class="action-stack" @submit.prevent="correct">
+        <p>争议记录成功后，这次评价将停止影响能力状态和任务推荐。</p>
+        <label>哪里需要纠正<textarea v-model="correction.reason" rows="4" maxlength="1000" /></label>
+        <p v-if="error" class="alert error-alert" role="alert">{{ error }}</p>
+        <div class="modal-actions">
+          <button autofocus class="btn secondary" type="button" :disabled="busy" @click="correction = undefined">取消</button>
+          <button class="btn primary" :disabled="busy || !correction.reason.trim()">记录争议</button>
+        </div>
+      </form>
+    </WorkspaceDialog>
   </main>
 </template>
-
-<style scoped>
-.learning-page{max-width:1600px}.learning-actions,.learning-toolbar,.learning-job{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.learning-toolbar{margin:18px 0}.learning-toolbar .outline-chip{margin-right:auto}.learning-goal{font-size:21px;line-height:1.65;margin:20px 0}.learning-create{padding:28px;max-width:900px}.learning-create form,.learning-cap-edit{display:grid;gap:18px}.learning-create form{margin-top:24px}.learning-check{display:flex;align-items:flex-start;gap:10px;margin:12px 0;font-weight:400}.learning-check input{width:16px;flex-shrink:0;margin-top:4px}.learning-check span{min-width:0}.learning-check small,.learning-summary small{display:block;color:#73827e;margin-top:5px}.learning-source{padding-top:12px;border-top:1px solid #e5ece9}.learning-source blockquote{max-height:200px;overflow:auto}.learning-cap-edit{padding:24px;margin-bottom:16px}.learning-cap-edit details{min-width:0}.learning-plan{max-width:1000px}.learning-notice{padding:14px 18px;background:#eef6f2;border:1px solid #dbe9e1;border-radius:10px;color:#3b6252;line-height:1.7;margin:16px 0}.learning-job{padding:16px;margin:12px 0}.learning-job>div{flex:1}.learning-job p{margin:6px 0 0;color:#8d5544}.learning-tabs{display:flex;border-bottom:1px solid #dae4df;margin:24px 0}.learning-tabs button{padding:14px 20px;border-bottom:2px solid transparent;color:#6c7f76}.learning-tabs .active{color:#277555;border-bottom-color:#277555}.learning-layout{display:grid;grid-template-columns:240px minmax(300px,1fr) 270px;gap:18px;align-items:start}.learning-layout>.panel{padding:22px;min-width:0}.learning-layout h3{display:flex;gap:8px;align-items:center;margin:0 0 18px}.learning-capabilities article{padding:18px 0;border-bottom:1px solid #e4eae7}.learning-capabilities article.active{border-left:3px solid #3f8b67;padding-left:12px}.learning-capabilities p,.learning-help p{font-size:13px;line-height:1.8;color:#748078}.learning-capabilities small{display:block;margin-top:8px;color:#976c4a}.learning-obstacle{margin-top:20px;background:#faf6ed;padding:12px;border-radius:8px}.learning-prompt{white-space:pre-wrap;line-height:1.9;margin:16px 0}.learning-task details{margin:18px 0}.learning-task li{margin:10px 0;line-height:1.7}.learning-task textarea{margin:10px 0 18px;line-height:1.85}.learning-help>.btn{width:100%;justify-content:flex-start;margin:7px 0}.learning-hint{margin-top:22px;line-height:1.85;white-space:pre-wrap;font-size:13px}.learning-feedback{margin-top:28px}.learning-attempt,.learning-decision{padding:24px;margin:16px 0;line-height:1.8;overflow-wrap:anywhere}.learning-attempt pre{white-space:pre-wrap;font:inherit;background:#f7f9f7;padding:14px;border-radius:8px}.learning-criterion{border-top:1px solid #e5eae7;margin-top:16px;padding-top:16px}.learning-criterion small{color:#748078}blockquote{border-left:3px solid #b7cdc0;margin:12px 0;padding:8px 14px;white-space:pre-wrap;line-height:1.8;color:#65776c;font-size:13px}.learning-list{display:grid;gap:16px}.learning-summary{display:flex;text-align:left;align-items:center;gap:20px;padding:24px;width:100%}.learning-summary>span:nth-child(2){flex:1}.learning-summary strong{line-height:1.7}.learning-empty{text-align:center;padding:64px 30px}.learning-empty>svg{color:#448267;margin-bottom:20px}.learning-empty p{max-width:500px;margin:18px auto 25px;line-height:1.9;color:#748078}fieldset{border:1px solid #e1e8e3;border-radius:10px;padding:15px}legend{padding:0 8px;font-size:13px;color:#66786e}label{display:flex;flex-direction:column;gap:8px}label.learning-check{flex-direction:row}select{width:100%;padding:12px;border:1px solid #dce4df;border-radius:8px;background:white;color:#334d3e}details summary{cursor:pointer;line-height:1.8}input,textarea{width:100%}@media(max-width:1250px){.learning-layout{grid-template-columns:200px minmax(280px,1fr)}.learning-help{grid-column:2}}@media(max-width:800px){.learning-layout{grid-template-columns:1fr}.learning-help{grid-column:auto}.learning-capabilities{order:3}.learning-actions .btn{flex:1}.learning-create{padding:20px}.learning-toolbar{gap:10px}.learning-goal{font-size:18px}}
-</style>

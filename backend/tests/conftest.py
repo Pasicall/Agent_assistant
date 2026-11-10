@@ -35,6 +35,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("RAG_AUTO_MIGRATE", "true")
     monkeypatch.setenv("RAG_ALLOW_REGISTRATION", "true")
     monkeypatch.setenv("RAG_WORKER_ROLE", "all")
+    monkeypatch.setenv("RAG_EVALUATION_ENABLED", "true")
+    monkeypatch.setenv("RAG_BROWSER_SOURCE_SYNC_ENABLED", "false")
+    monkeypatch.setenv("RAG_DIAGNOSTICS_TOKEN", "")
     get_settings.cache_clear()
     from app.services.retrieval import client as vector_client
     vector_client.cache_clear()

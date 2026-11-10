@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -55,18 +55,26 @@ class Settings(BaseSettings):
     global_active_chats: int = Field(default=4, ge=1, le=128)
     worker_role: str = "all"
     learning_enabled: bool = True
+    evaluation_enabled: bool = False
     learning_model_repairs: int = Field(default=1, ge=0, le=1)
     user_daily_model_requests: int = Field(default=500, ge=1)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     metrics_token: str = ""
+    diagnostics_token: str = ""
     cookie_secure: bool = False
     public_base_url: str = "http://localhost:5173"
     citation_verifier: str = "numeric"  # numeric | llm; numeric is explicitly a partial check
     verifier_model: str = ""
     evidence_min_coverage: float = Field(default=0.25, ge=0, le=1)
     source_sync_root: Path | None = None
+    browser_source_sync_enabled: bool = False
     pdf_vision_all_pages: bool = False
     ocr_timeout: int = Field(default=60, ge=5, le=300)
+
+    @field_validator("source_sync_root", mode="before")
+    @classmethod
+    def empty_source_root(cls, value):
+        return None if value == "" else value
 
     @model_validator(mode="after")
     def validate_runtime(self):

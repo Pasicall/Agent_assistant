@@ -98,6 +98,7 @@ def main():
         from fastapi.testclient import TestClient
         from sqlalchemy import select, text
         settings = get_settings()
+        settings.evaluation_enabled = args.lifecycle
         if args.mode == 'configured':
             assert settings.embedding_provider != 'hash' and settings.llm_model, 'Configure semantic embeddings and generation'
         if args.mode == 'generation':

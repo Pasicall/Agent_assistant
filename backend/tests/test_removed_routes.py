@@ -27,7 +27,7 @@ def test_enterprise_endpoint_is_unreachable(client, method, path):
     assert client.request(method, path, headers=owner).status_code == 404
 
 
-def test_openapi_and_runtime_only_expose_current_capabilities(client):
+def test_openapi_and_runtime_only_expose_current_capabilities(client, monkeypatch):
     schema = client.get('/openapi.json').json()
     assert not any(any(term in path for term in ['/organizations', '/platform/', '/auth/oidc/', '/members', '/audit-events', '/operations'])
         for path in schema['paths'])
@@ -40,7 +40,8 @@ def test_openapi_and_runtime_only_expose_current_capabilities(client):
     assert set(client.get('/api/auth/me', headers=owner).json()) == {'id', 'email', 'name'}
     logged_in = client.post('/api/auth/login', json={'email': 'owner@example.com', 'password': 'correct horse 47'})
     assert set(logged_in.json()['user']) == {'id', 'email', 'name'}
-    features = client.get('/api/system', headers=owner).json()['features']
+    monkeypatch.setattr(client.app.state.settings, 'diagnostics_token', 'operator-token')
+    features = client.get('/api/system', headers={'Authorization': 'Bearer operator-token'}).json()['features']
     assert not {'organization_roles', 'oidc_configured'} & features.keys()
     assert all(features[key] for key in ['hybrid_retrieval', 'bounded_agent', 'revocable_sessions',
         'persistent_bm25', 'document_versions', 'async_evaluations', 'durable_cleanup'])

@@ -5,7 +5,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -77,13 +77,29 @@ def own_conversation(db, user, conversation_id):
 
 
 def document_payload(db, document):
-    job_id = db.scalar(select(IngestionJob.id).where(IngestionJob.document_id == document.id)
-                       .order_by(IngestionJob.created_at.desc()).limit(1))
+    job = db.execute(select(IngestionJob.id, IngestionJob.updated_at).where(IngestionJob.document_id == document.id)
+                    .order_by(IngestionJob.created_at.desc()).limit(1)).first()
     return {"id": document.id, "knowledge_base_id": document.knowledge_base_id, "name": document.name,
-            "size_bytes": document.size_bytes, "status": document.status, "chunk_count": document.chunk_count,
-            "error": document.error, "created_at": document.created_at, "job_id": job_id,
+            "size_bytes": document.size_bytes, "sha256": document.sha256, "status": document.status, "chunk_count": document.chunk_count,
+            "error": ingestion_error(document.error), "created_at": document.created_at, "job_id": job.id if job else None,
+            "updated_at": job.updated_at if job else document.created_at,
             "active_revision_id": document.active_revision_id, "expires_at": document.expires_at,
             "source": document.source}
+
+
+def ingestion_error(error):
+    if not error:
+        return None
+    for marker, message in (
+        ("文本编码无法识别", "文本编码无法识别，请转换为 UTF-8 后更新文件。"),
+        ("PDF 无法打开", "PDF 无法打开，请检查文件是否已加密或损坏。"),
+        ("OCR", "图片或扫描页未能识别，请上传带文字的版本或联系部署者。"),
+        ("没有可检索文本", "文件没有可检索的文字，请检查原文。"),
+        ("超过", "文件超出处理限制，请缩小或拆分后再上传。"),
+    ):
+        if marker in error:
+            return message
+    return "暂时无法处理这份资料。请重试，或更新文件后再试。"
 
 
 def evaluation_payload(run, db=None, user=None):
@@ -162,7 +178,7 @@ def knowledge_bases(db: DB, user: CurrentUser):
     query = select(KnowledgeBase, func.count(Document.id)).outerjoin(Document).where(
         allowed_kbs(user.id)).group_by(KnowledgeBase.id).order_by(KnowledgeBase.created_at.desc())
     return [{"id": kb.id, "name": kb.name, "description": kb.description,
-             "created_at": kb.created_at, "document_count": count}
+            "created_at": kb.created_at, "document_count": count}
             for kb, count in db.execute(query).all()]
 
 
@@ -224,24 +240,29 @@ def documents(db: DB, user: CurrentUser, knowledge_base_id: str | None = None):
 
 @router.post("/documents/upload", status_code=201)
 async def upload_document(request: Request, db: DB, user: CurrentUser,
-                          file: Annotated[UploadFile, File()], knowledge_base_id: Annotated[str, Form()],
-                          document_id: Annotated[str | None, Form()] = None):
+                        file: Annotated[UploadFile, File()], knowledge_base_id: Annotated[str, Form()],
+                        document_id: Annotated[str | None, Form()] = None):
     kb = require_kb(db, user, knowledge_base_id)
     replacing = own_document(db, user, document_id) if document_id else None
+
     if replacing and replacing.knowledge_base_id != kb.id:
         raise HTTPException(422, "文档不属于所选知识库")
     if replacing and replacing.status not in {"ready", "failed"}:
         raise HTTPException(409, "已有文档任务正在运行")
+    
     filename = Path((file.filename or "").replace("\\", "/")).name[:255]
     suffix = Path(filename).suffix.lower()
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(415, "不支持此格式。支持 PDF、Word(docx)、文本、Markdown、CSV、JSON、HTML 和图片")
+    
     settings = request.app.state.settings
     upload_root = (settings.data_dir / "uploads").resolve()
     upload_root.mkdir(parents=True, exist_ok=True)
     target = upload_root / f"{new_id()}{suffix}"
     digest, size, committed = hashlib.sha256(), 0, False
+    
     try:
+        # 检查文档大小
         with target.open("xb") as output:
             while data := await file.read(1024 * 1024):
                 size += len(data)
@@ -249,30 +270,37 @@ async def upload_document(request: Request, db: DB, user: CurrentUser,
                     raise HTTPException(413, f"文档不能超过 {settings.max_upload_mb} MB")
                 digest.update(data)
                 output.write(data)
+
         if size == 0:
             raise HTTPException(400, "不能上传空文件")
+        
         existing = db.scalar(select(Document).where(Document.knowledge_base_id == knowledge_base_id,
                                                     Document.sha256 == digest.hexdigest()))
         if existing and not replacing:
             target.unlink(missing_ok=True)
             payload = document_payload(db, existing)
             return {"document": payload, "job_id": payload["job_id"], "duplicate": True}
+        
         if existing and replacing and existing.id != replacing.id:
             raise HTTPException(409, "相同内容已存在于此知识库的另一文档中")
+        
         from app.services.lifecycle import reserve_ingestion
         reserve_ingestion(db, user, knowledge_base_id, settings, size)
         if replacing:
             db.refresh(replacing)
             if replacing.status not in {"ready", "failed"}:
                 raise HTTPException(409, "已有文档任务正在运行")
+            
         document = replacing or Document(knowledge_base_id=knowledge_base_id, name=filename, stored_path=str(target),
                             sha256=digest.hexdigest(), size_bytes=size, status="queued")
         db.add(document)
         db.flush()
+
         revision = DocumentRevision(document_id=document.id, name=filename, stored_path=str(target),
                                     sha256=digest.hexdigest(), size_bytes=size)
         db.add(revision)
         db.flush()
+
         document.status, document.error = "queued", None
         job = IngestionJob(document_id=document.id, revision_id=revision.id)
         db.add(job)
@@ -280,6 +308,7 @@ async def upload_document(request: Request, db: DB, user: CurrentUser,
         committed = True
         notify_job(settings, job.id)
         return {"document": document_payload(db, document), "job_id": job.id, "duplicate": False}
+    
     except IntegrityError:
         db.rollback()
         target.unlink(missing_ok=True)
@@ -354,7 +383,7 @@ def job_status(job_id: str, db: DB, user: CurrentUser):
     if job is None:
         raise HTTPException(404, "任务不存在")
     return {"id": job.id, "status": job.status, "progress": job.progress,
-            "error": job.error, "document_id": job.document_id, "stage": job.stage,
+            "error": ingestion_error(job.error), "document_id": job.document_id, "stage": job.stage,
             "processed_pages": job.processed_pages, "total_pages": job.total_pages}
 
 
@@ -446,7 +475,7 @@ def conversation_detail(conversation_id: str, db: DB, user: CurrentUser):
         restricted = not citations_available(db, user.id, message.citations)
         payloads.append({"id": message.id, "role": message.role,
             "content": "此回答的来源已删除或不再可访问，内容已隐藏。" if restricted else message.content,
-            "citations": [] if restricted else message.citations,
+            "citations": [] if restricted else message.citations, "restricted": restricted,
             "trace": [] if restricted else message.trace, "created_at": message.created_at,
             "run_metadata": {} if restricted else message.run_metadata})
     return {"id": item.id, "title": item.title, "messages": payloads}
@@ -471,7 +500,12 @@ def validate_expected_documents(db, user, cases, kb_ids):
         raise HTTPException(422, "预期文档必须属于当前用户所选知识库")
 
 
-@router.post("/evaluations", status_code=202)
+def require_evaluation(request: Request, user: CurrentUser):
+    if not request.app.state.settings.evaluation_enabled:
+        raise HTTPException(403, "此部署未启用评测")
+
+
+@router.post("/evaluations", status_code=202, dependencies=[Depends(require_evaluation)])
 def create_evaluation(body: EvaluationRequest, request: Request, db: DB, user: CurrentUser):
     scoped_chunks(db, user, body.knowledge_base_ids)
     validate_expected_documents(db, user, body.cases, body.knowledge_base_ids)
@@ -504,7 +538,7 @@ def create_evaluation(body: EvaluationRequest, request: Request, db: DB, user: C
     return evaluation_payload(run, db, user)
 
 
-@router.post("/evaluations/compare")
+@router.post("/evaluations/compare", dependencies=[Depends(require_evaluation)])
 def compare_evaluation(body: ComparisonRequest, db: DB, user: CurrentUser):
     from app.services.evaluation import compare_retrieval
     chunks = scoped_chunks(db, user, body.knowledge_base_ids)
@@ -518,13 +552,13 @@ def compare_evaluation(body: ComparisonRequest, db: DB, user: CurrentUser):
         raise HTTPException(503, "检索对比暂时不可用") from exc
 
 
-@router.get("/evaluations")
+@router.get("/evaluations", dependencies=[Depends(require_evaluation)])
 def evaluations(db: DB, user: CurrentUser):
     return [evaluation_payload(run, db, user) for run in db.scalars(select(EvaluationRun)
             .where(EvaluationRun.user_id == user.id).order_by(EvaluationRun.created_at.desc())).all()]
 
 
-@router.get("/evaluations/{evaluation_id}")
+@router.get("/evaluations/{evaluation_id}", dependencies=[Depends(require_evaluation)])
 def evaluation_detail(evaluation_id: str, db: DB, user: CurrentUser):
     run = db.scalar(select(EvaluationRun).where(EvaluationRun.id == evaluation_id, EvaluationRun.user_id == user.id))
     if run is None:
@@ -533,6 +567,22 @@ def evaluation_detail(evaluation_id: str, db: DB, user: CurrentUser):
 
 
 @router.get("/system")
-def system_info(user: CurrentUser):
+def system_info(request: Request):
+    from app.api.diagnostics import require_operator
     from app.services.runtime import capabilities
+    require_operator(request)
     return capabilities()
+
+
+@router.get("/capabilities")
+def workspace_capabilities(request: Request, user: CurrentUser):
+    settings = request.app.state.settings
+    return {
+        "max_upload_mb": settings.max_upload_mb,
+        "learning_enabled": settings.learning_enabled,
+        "learning_assessment_configured": settings.learning_enabled and bool(
+            settings.llm_model and (settings.llm_provider == "ollama" or settings.llm_api_key)
+        ),
+        "evaluation_enabled": settings.evaluation_enabled,
+        "folder_sync_available": settings.browser_source_sync_enabled and bool(settings.source_sync_root),
+    }
