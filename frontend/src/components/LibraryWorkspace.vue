@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import { readLocal, writeLocal } from '../storage'
-import { computed, ref, toRef, watch } from 'vue'
-import { FileText, UploadCloud } from 'lucide-vue-next'
+import { computed, nextTick, ref, toRef, watch } from 'vue'
+import { FileCode2, FileImage, FileSpreadsheet, FileText, MoreHorizontal, Search, UploadCloud } from 'lucide-vue-next'
 import { api, ApiError, type Capabilities, type Document, type KnowledgeBase } from '../api'
 import type { Corpus } from '../api/corpus'
-import { available, dateText, documentStatus, errorText, fileProblem, processing, record, uploadExtensions, useVisiblePolling, type Upload, type UploadSession } from '../workspace'
+import { available, documentStatus, errorText, expired, fileProblem, parseTime, processing, record, uploadExtensions, useVisiblePolling, type Upload, type UploadSession } from '../workspace'
 import ConfirmAction from './ConfirmAction.vue'
 import DocumentVersions from './DocumentVersions.vue'
 import WorkspaceDialog from './WorkspaceDialog.vue'
@@ -29,6 +29,7 @@ const uploading = ref(false)
 const target = toRef(props.uploadSession, 'target')
 const detailId = ref('')
 const detail = computed(() => state.documents.find(doc => doc.id === detailId.value))
+const libraryContent = ref<HTMLElement>()
 const deleteTarget = ref<{ kind: 'library' | 'document'; id: string; title: string; description: string }>()
 const menu = ref('')
 const rowBusy = ref('')
@@ -37,8 +38,11 @@ const maxMb = computed(() => props.capabilities?.max_upload_mb)
 const replaceQueue = ref(false)
 const proposedFiles = ref<File[]>([])
 const replacementApproved = ref(false)
-const unfinished = computed(() => batch.value.some(item => item.state === 'pending' || item.unknown ||
-  (item.state === 'failed' && maxMb.value && !fileProblem(item.file, maxMb.value))))
+const pendingCount = computed(() => batch.value.filter(item => item.state === 'pending' || item.unknown ||
+  (item.state === 'failed' && maxMb.value && !fileProblem(item.file, maxMb.value))).length)
+const unfinished = computed(() => pendingCount.value > 0)
+const queueOpen = ref(unfinished.value || batch.value.some(item => item.state === 'sending'))
+watch(unfinished, pending => { if (pending) queueOpen.value = true })
 const batchCounts = computed(() => ({
   pending: batch.value.filter(item => item.state === 'pending').length,
   accepted: batch.value.filter(item => item.state === 'accepted').length,
@@ -50,7 +54,23 @@ const waitingForFiles = computed(() => !uploading.value && !busy.value && !!maxM
 watch(() => state.bases, bases => {
   if (!bases.some(kb => kb.id === selected.value)) selected.value = bases.find(kb => kb.id === target.value)?.id || bases[0]?.id || ''
 })
-watch(selected, () => { query.value = ''; menu.value = ''; localError.value = '' })
+watch(selected, () => {
+  query.value = ''
+  menu.value = ''
+  localError.value = ''
+  detailId.value = ''
+})
+watch(() => !!detail.value && props.active, async () => {
+  const content = libraryContent.value
+  if (!content || !window.scrollY || !props.active) return
+  const width = content.clientWidth
+  const row = Array.from(content.querySelectorAll('.library-row')).find(item => item.getBoundingClientRect().bottom > 0)
+  const top = row?.getBoundingClientRect().top
+  await nextTick()
+  if (row?.isConnected && top !== undefined && content.clientWidth !== width) {
+    window.scrollBy(0, row.getBoundingClientRect().top - top)
+  }
+})
 useVisiblePolling(toRef(props, 'active'), () => docs.value.some(processing),
   async () => {
     if (!busy.value && !uploading.value && !rowBusy.value && !deleteTarget.value && !state.loading) await props.corpus.refresh()
@@ -101,6 +121,7 @@ function beginBatch(files: File[]) {
   target.value = selected.value
   localError.value = ''
   notice.value = ''
+  queueOpen.value = true
   batch.value = items
   if (target.value) void sendBatch()
   else showDialog('upload')
@@ -247,86 +268,121 @@ const restoreKey = (id: string) => `document-restore:${props.uploadSession.owner
 function isRestoring(doc: Document) {
   return processing(doc) && doc.job_id === readLocal(restoreKey(doc.id))
 }
+
+function fileIcon(filename: string) {
+  const extension = filename.split('.').pop()?.toLowerCase()
+  if (extension && ['png', 'jpg', 'jpeg', 'webp'].includes(extension)) return FileImage
+  if (extension === 'csv') return FileSpreadsheet
+  if (extension && ['html', 'htm', 'json'].includes(extension)) return FileCode2
+  return FileText
+}
+
+function statusTone(doc: Document) {
+  if (expired(doc)) return 'neutral'
+  if (processing(doc)) return 'pending'
+  if (doc.status === 'failed' || doc.error) return 'failed'
+  return available(doc) ? 'ready' : 'neutral'
+}
 </script>
 
 <template>
   <main class="page library-page">
-    <div class="page-heading">
-      <h1>资料库</h1>
-      <button v-if="docs.length" class="btn primary" :disabled="!waitingForFiles" @click="requestUpload"><UploadCloud :size="16" />上传资料</button>
-    </div>
-    <input ref="input" type="file" hidden multiple :accept="uploadExtensions" @change="chooseFiles" @cancel="replacementApproved = false" />
-    <div v-if="state.error" class="alert error-alert" role="alert"><span>资料读取失败。{{ state.error }}</span> <button class="text-button" @click="corpus.refresh()">重试</button></div>
-    <p v-if="!state.loaded && !state.error" role="status">正在读取资料库…</p>
-    <template v-if="state.loaded">
-      <div class="library-toolbar">
-        <label>当前知识库
-          <select v-model="selected" :disabled="uploading || busy || !state.bases.length">
-            <option v-if="!state.bases.length" value="">尚无知识库</option>
-            <option v-for="kb in state.bases" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
-          </select>
-        </label>
-        <details :open="menu === 'library'" @toggle="($event.target as HTMLDetailsElement).open ? menu = 'library' : menu === 'library' && (menu = '')">
-          <summary>知识库更多操作</summary>
-          <div class="action-stack">
-            <button class="text-button" :disabled="uploading || busy" @click="showDialog('create')">新建知识库</button>
-            <button v-if="selectedKb && capabilities?.folder_sync_available" class="text-button" :disabled="uploading || busy" @click="showDialog('sync')">从目录同步</button>
-            <button v-if="selectedKb" class="text-button danger-button" :disabled="uploading || busy" @click="requestDelete('library', selectedKb)">删除此知识库</button>
+    <div ref="libraryContent" class="library-content">
+      <header class="page-heading library-heading">
+        <div class="library-title">
+          <h1>{{ selectedKb?.name || '资料库' }}</h1>
+          <label v-if="state.loaded && state.bases.length" class="library-switch">
+            <span>当前知识库</span>
+            <select v-model="selected" :disabled="uploading || busy">
+              <option v-for="kb in state.bases" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
+            </select>
+          </label>
+        </div>
+        <div v-if="state.loaded" class="library-actions inline-actions">
+          <button v-if="docs.length" class="btn primary" :disabled="!waitingForFiles" @click="requestUpload"><UploadCloud :size="17" />上传资料</button>
+          <button v-if="docs.some(available)" class="btn secondary" @click="emit('ask', selected)">基于此库提问</button>
+          <details class="menu-popover" :open="menu === 'library'" @toggle="($event.target as HTMLDetailsElement).open ? menu = 'library' : menu === 'library' && (menu = '')">
+            <summary class="btn secondary">知识库更多操作</summary>
+            <div class="menu-items">
+              <button class="text-button" :disabled="uploading || busy" @click="showDialog('create')">新建知识库</button>
+              <button v-if="selectedKb && capabilities?.folder_sync_available" class="text-button" :disabled="uploading || busy" @click="showDialog('sync')">从目录同步</button>
+              <button v-if="selectedKb" class="text-button danger-button" :disabled="uploading || busy" @click="requestDelete('library', selectedKb)">删除此知识库</button>
+            </div>
+          </details>
+        </div>
+        <p v-if="!docs.some(available) && docs.some(processing)" class="library-waiting muted" role="status">资料正在处理，显示可用后即可基于此库提问。</p>
+      </header>
+      <input ref="input" type="file" hidden multiple :accept="uploadExtensions" @change="chooseFiles" @cancel="replacementApproved = false" />
+      <div v-if="state.error" class="alert error-alert" role="alert">资料读取失败。{{ state.error }} <button class="text-button" @click="corpus.refresh()">重试</button></div>
+      <p v-if="!state.loaded && !state.error" role="status">正在读取资料库…</p>
+      <template v-if="state.loaded">
+        <p v-if="localError" class="alert error-alert" role="alert">{{ localError }}</p>
+        <p v-if="notice" class="workspace-notice" role="status">{{ notice }}</p>
+
+        <section v-if="!docs.length" class="panel library-empty" @dragover.prevent @drop.prevent="beginBatch(Array.from($event.dataTransfer?.files || []))">
+          <h2>{{ selectedKb ? '这个知识库还没有资料' : '添加第一份资料' }}</h2>
+          <p>{{ selectedKb ? '可将文件拖到这里，或从设备选择。' : '选择文件后，可以在同一步创建目标知识库。' }}</p>
+          <button class="btn primary" :disabled="!waitingForFiles" @click="requestUpload"><UploadCloud :size="16" />上传资料</button>
+          <p>上传后会自动处理，显示可用后即可提问。</p>
+          <small v-if="maxMb">单文件最多 {{ maxMb }} MB，支持 PDF、Word、文本和图片等格式。</small>
+        </section>
+
+        <details v-if="batch.length" class="panel upload-queue" :open="queueOpen" @toggle="queueOpen = ($event.target as HTMLDetailsElement).open">
+          <summary><strong>本次上传</strong><span class="muted">{{ pendingCount }} 项待办<span v-if="uploading"> · 提交中</span></span></summary>
+          <div class="queue-content" aria-live="polite">
+            <div class="section-heading">
+              <p v-if="target">目标库：{{ state.bases.find(kb => kb.id === target)?.name || '目标库已不可用' }}</p>
+              <button v-if="!uploading && batchCounts.pending" class="text-button" @click="target ? sendBatch() : showDialog('upload')">继续待提交文件</button>
+            </div>
+            <p class="muted">待提交 {{ batchCounts.pending }} · 已接收 {{ batchCounts.accepted }} · 待核对 {{ batchCounts.unknown }} · 失败 {{ batchCounts.failed }}</p>
+            <p class="muted">已接收的文件会继续处理，可用状态请查看资料列表。</p>
+            <ul>
+              <li v-for="(item, index) in batch" :key="index">
+                <strong>{{ item.file.name }}</strong>
+                <span>{{ { pending: '待提交', sending: '提交中', accepted: '已接收', failed: '失败' }[item.state] }}{{ item.detail ? ' · ' + item.detail : '' }}</span>
+                <button v-if="item.state === 'failed' && maxMb && !fileProblem(item.file, maxMb)" class="text-button" :disabled="uploading" @click="sendBatch(item)">{{ item.unknown ? '核对并重试' : '重试此文件' }}</button>
+              </li>
+            </ul>
           </div>
         </details>
-        <button v-if="docs.some(available)" class="btn secondary" @click="emit('ask', selected)">基于此库提问</button>
-        <p v-else-if="docs.some(processing)" role="status">资料正在处理，显示可用后即可基于此库提问。</p>
-      </div>
 
-      <p v-if="localError" class="alert error-alert" role="alert">{{ localError }}</p>
-      <p v-if="notice" class="workspace-notice" role="status">{{ notice }}</p>
-
-      <section v-if="!docs.length" class="panel library-empty" @dragover.prevent @drop.prevent="beginBatch(Array.from($event.dataTransfer?.files || []))">
-        <h2>{{ selectedKb ? '这个知识库还没有资料' : '添加第一份资料' }}</h2>
-        <p>{{ selectedKb ? '可将文件拖到这里，或从设备选择。' : '选择文件后，可以在同一步创建目标知识库。' }}</p>
-        <button class="btn primary" :disabled="!waitingForFiles" @click="requestUpload"><UploadCloud :size="16" />上传资料</button>
-        <p>上传后会自动处理，显示可用后即可提问。</p>
-        <small v-if="maxMb">单文件最多 {{ maxMb }} MB，支持 PDF、Word、文本和图片等格式。</small>
-      </section>
-
-      <section v-if="batch.length" class="panel upload-queue" aria-label="批量上传" aria-live="polite">
-        <div class="section-heading">
-          <h2>本次上传 <small v-if="target">· {{ state.bases.find(kb => kb.id === target)?.name || '目标库已不可用' }}</small></h2>
-          <button v-if="!uploading && batch.some(item => item.state === 'pending')" class="text-button" @click="target ? sendBatch() : showDialog('upload')">继续待提交文件</button>
-        </div>
-        <p>待提交 {{ batchCounts.pending }} · 已接收 {{ batchCounts.accepted }} · 待核对 {{ batchCounts.unknown }} · 失败 {{ batchCounts.failed }}</p>
-        <p class="muted">已接收的文件会继续处理，可用状态请查看资料列表。</p>
-        <ul>
-          <li v-for="(item, index) in batch" :key="index">
-            <strong>{{ item.file.name }}</strong>
-            <span>{{ { pending: '待提交', sending: '提交中', accepted: '已接收', failed: '失败' }[item.state] }}{{ item.detail ? ' · ' + item.detail : '' }}</span>
-            <button v-if="item.state === 'failed' && maxMb && !fileProblem(item.file, maxMb)" class="text-button" :disabled="uploading" @click="sendBatch(item)">{{ item.unknown ? '核对并重试' : '重试此文件' }}</button>
-          </li>
-        </ul>
-      </section>
-
-      <section v-if="docs.length" class="panel library-list" @dragover.prevent @drop.prevent="beginBatch(Array.from($event.dataTransfer?.files || []))">
-        <div class="section-heading">
-          <h2>当前资料</h2>
-          <input v-model="query" type="search" aria-label="搜索资料名称" placeholder="搜索资料名称" />
-        </div>
-        <p v-if="!filtered.length" class="muted">没有匹配的资料。 <button class="text-button" @click="query = ''">清除搜索</button></p>
-        <ul>
-          <li v-for="doc in filtered" :key="doc.id" class="library-row">
-            <button class="text-button file-name" @click="detailId = doc.id"><FileText :size="16" />{{ doc.name }}</button>
-            <span>{{ documentStatus(doc, isRestoring(doc)) }}
-              <button v-if="doc.status === 'failed'" class="text-button" :disabled="!!rowBusy" @click="retry(doc)">重试</button>
-              <button v-else-if="doc.status === 'ready' && doc.error" class="text-button" @click="detailId = doc.id">查看原因</button>
-            </span>
-            <time :datetime="doc.updated_at || doc.created_at">{{ dateText(doc.updated_at || doc.created_at) }}</time>
-            <details :open="menu === doc.id" @toggle="($event.target as HTMLDetailsElement).open ? menu = doc.id : menu === doc.id && (menu = '')">
-              <summary :aria-label="'更多操作 · ' + doc.name">更多</summary>
-              <button class="text-button danger-button" @click="requestDelete('document', doc)">删除资料</button>
-            </details>
-          </li>
-        </ul>
-      </section>
-    </template>
+        <section v-if="docs.length" class="library-list" aria-label="当前资料" @dragover.prevent @drop.prevent="beginBatch(Array.from($event.dataTransfer?.files || []))">
+          <div class="library-search">
+            <label class="search-field"><Search :size="17" aria-hidden="true" />
+              <input v-model="query" type="search" aria-label="搜索资料名称" placeholder="搜索资料名称" />
+            </label>
+            <p class="muted" aria-live="polite">{{ query.trim() ? filtered.length + ' / ' + docs.length : docs.length }} 份资料</p>
+          </div>
+          <p v-if="!filtered.length" class="panel library-no-results">没有匹配的资料。 <button class="text-button" @click="query = ''">清除搜索</button></p>
+          <div v-else class="library-table">
+            <table aria-label="当前资料" role="table">
+              <thead><tr><th scope="col">文件名</th><th scope="col">状态</th><th scope="col">更新日期</th><th scope="col">更多</th></tr></thead>
+              <tbody>
+                <tr v-for="doc in filtered" :key="doc.id" class="library-row" :class="{ selected: detailId === doc.id }" role="row">
+                  <td class="library-file" role="cell">
+                    <button class="file-name" :aria-expanded="detailId === doc.id" @click="detailId = doc.id">
+                      <component :is="fileIcon(doc.name)" :size="18" aria-hidden="true" /><span>{{ doc.name }}</span>
+                    </button>
+                  </td>
+                  <td class="library-status" role="cell">
+                    <span class="status-badge" :class="statusTone(doc)"><span class="status-dot" aria-hidden="true"></span>{{ documentStatus(doc, isRestoring(doc)) }}</span>
+                    <button v-if="doc.status === 'failed'" class="text-button" :disabled="!!rowBusy" @click="retry(doc)">重试</button>
+                    <button v-else-if="doc.status === 'ready' && doc.error" class="text-button" @click="detailId = doc.id">查看原因</button>
+                  </td>
+                  <td class="library-date" role="cell"><time :datetime="doc.updated_at || doc.created_at">{{ parseTime(doc.updated_at || doc.created_at).toLocaleDateString('zh-CN') }}</time></td>
+                  <td class="library-row-actions" role="cell">
+                    <details class="menu-popover" :open="menu === doc.id" @toggle="($event.target as HTMLDetailsElement).open ? menu = doc.id : menu === doc.id && (menu = '')">
+                      <summary class="icon-button" :aria-label="'更多操作 · ' + doc.name"><MoreHorizontal :size="20" /></summary>
+                      <div class="menu-items"><button class="text-button danger-button" @click="requestDelete('document', doc)">删除资料</button></div>
+                    </details>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </template>
+    </div>
 
     <WorkspaceDialog v-if="replaceQueue" title="当前批次还有待办文件" @close="keepQueue">
       <p>当前目标库为 {{ state.bases.find(kb => kb.id === target)?.name || '尚未选择' }}。可返回队列继续处理，或选择新文件替换待办项。</p>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { BookOpen, ChevronRight, Layers3, Menu, MessageSquare } from 'lucide-vue-next'
+import { BookOpen, Folder, Layers3, Menu, MessageSquare, Settings } from 'lucide-vue-next'
 import { api, type Capabilities, type User } from '../api'
 import { usePreferences } from '../preferences'
 import { useCorpus } from '../api/corpus'
@@ -23,15 +23,18 @@ const visited = ref(new Set<View>([view.value]))
 let navigated = false
 let startupApplied = false
 const mobileNav = ref(false)
+const mobileMenu = ref<HTMLButtonElement>()
+const settingsOpener = ref<HTMLElement>()
 const account = ref(false)
 const security = ref(false)
 const accountError = ref('')
+const settingsNotice = ref('')
 const signingOut = ref(false)
 const selectedLibrary = ref('')
 const chatEntry = ref<{ scope: string }>()
 const titles = { library: '资料库', chat: '问答', learning: '专题学习', evaluations: '开发工具' }
 const nav = [
-  { id: 'library', icon: BookOpen },
+  { id: 'library', icon: Folder },
   { id: 'chat', icon: MessageSquare },
   { id: 'learning', icon: BookOpen },
 ] as const
@@ -64,6 +67,18 @@ async function loadCapabilities() {
   catch (error) { capabilityError.value = errorText(error) }
 }
 
+function openSettings() {
+  settingsOpener.value = mobileNav.value ? mobileMenu.value : undefined
+  mobileNav.value = false
+  settingsNotice.value = ''
+  account.value = true
+}
+
+function restoreDefaults() {
+  reset()
+  settingsNotice.value = '已恢复默认设置'
+}
+
 async function signOut() {
   if (signingOut.value) return
   signingOut.value = true
@@ -87,7 +102,7 @@ onMounted(() => { void loadCapabilities(); void corpus.refresh() })
   <div class="app-shell" :data-theme="theme" :data-font-size="preferences.fontSize">
     <aside class="sidebar">
       <button class="brand" @click="go('library')">
-        <span class="brand-mark"><Layers3 :size="23" /></span><span>知衡<small>KNOWLEDGE OS</small></span>
+        <span class="brand-mark"><Layers3 :size="23" /></span><span>知衡</span>
       </button>
       <nav aria-label="工作空间">
         <template v-for="item in nav" :key="item.id">
@@ -98,16 +113,14 @@ onMounted(() => { void loadCapabilities(); void corpus.refresh() })
         </template>
       </nav>
       <div class="sidebar-bottom">
-        <button class="nav-link" @click="account = true"><span class="avatar small" aria-hidden="true">{{ user.name.slice(0, 1) || 'U' }}</span><span>账号与设置</span></button>
+        <button class="nav-link" @click="openSettings"><Settings :size="19" aria-hidden="true" /><span>账号与设置</span></button>
       </div>
     </aside>
 
     <div class="main-shell">
-      <header class="topbar">
-        <div class="breadcrumb">
-          <button class="icon-button mobile-menu" aria-label="打开导航" @click="mobileNav = true"><Menu :size="20" /></button>
-          <span>工作空间</span><ChevronRight :size="13" /><strong>{{ titles[view] }}</strong>
-        </div>
+      <header class="mobile-topbar">
+        <button ref="mobileMenu" class="icon-button" aria-label="打开导航" @click="mobileNav = true"><Menu :size="22" /></button>
+        <span class="brand"><Layers3 :size="21" aria-hidden="true" />知衡</span>
       </header>
       <div v-if="capabilityError" class="global-error alert error-alert" role="alert">
         <span>功能状态读取失败。{{ capabilityError }}</span><button class="text-button" @click="loadCapabilities">重试</button>
@@ -125,41 +138,57 @@ onMounted(() => { void loadCapabilities(); void corpus.refresh() })
     </div>
 
     <WorkspaceDialog v-if="mobileNav" title="工作空间" drawer @close="mobileNav = false">
-      <div class="action-stack">
-        <button class="btn secondary" @click="go('library')">资料库</button>
-        <button class="btn secondary" @click="go('chat')">问答</button>
-        <button v-if="capabilities?.learning_enabled" class="btn secondary" @click="go('learning')">专题学习</button>
-        <button class="btn secondary" @click="mobileNav = false; account = true">账号与设置</button>
-      </div>
+      <nav class="mobile-nav" aria-label="工作空间">
+        <template v-for="item in nav" :key="item.id">
+          <button v-if="item.id !== 'learning' || capabilities?.learning_enabled" class="nav-link"
+            :class="{ active: view === item.id }" :aria-current="view === item.id ? 'page' : undefined" @click="go(item.id)">
+            <component :is="item.icon" :size="19" aria-hidden="true" />{{ titles[item.id] }}
+          </button>
+        </template>
+        <button class="nav-link" @click="openSettings"><Settings :size="19" aria-hidden="true" />账号与设置</button>
+      </nav>
     </WorkspaceDialog>
-    <WorkspaceDialog v-if="account" title="账号与设置" drawer :busy="signingOut" @close="account = false">
+    <WorkspaceDialog v-if="account" title="账号与设置" drawer :busy="signingOut" :return-focus="settingsOpener" @close="account = false">
       <p class="muted">仅保存在当前浏览器</p>
       <p v-if="storageUnavailable" class="workspace-notice" role="status">本次有效，刷新后可能恢复原设置</p>
-      <fieldset class="settings-group action-stack">
+      <fieldset class="settings-group" @change="settingsNotice = ''">
         <legend>通用与外观</legend>
-        <label>主题<select v-model="preferences.theme"><option value="light">浅色</option><option value="dark">深色</option><option value="system">跟随系统</option></select></label>
-        <label>正文字号<select v-model="preferences.fontSize"><option value="standard">标准（16px）</option><option value="large">大号（18px）</option></select></label>
-        <label>登录后打开<select v-model="preferences.startPage">
-          <option value="library">资料库</option><option value="chat">问答</option>
-          <option v-if="capabilities?.learning_enabled || preferences.startPage === 'learning'" value="learning" :disabled="!capabilities?.learning_enabled">专题学习</option>
-        </select></label>
-        <small>下次登录或重新打开工作台时生效。</small>
-        <p v-if="preferences.startPage === 'learning' && !capabilities?.learning_enabled" role="status">首选专题学习当前不可用，启动时会进入资料库。首选项已保留。</p>
+        <label class="settings-row"><span>主题</span>
+          <select v-model="preferences.theme"><option value="light">浅色</option><option value="dark">深色</option><option value="system">跟随系统</option></select>
+        </label>
+        <label class="settings-row"><span>正文字号</span>
+          <select v-model="preferences.fontSize"><option value="standard">标准（16px）</option><option value="large">大号（18px）</option></select>
+        </label>
+        <label class="settings-row">
+          <span>登录后打开<small>下次进入工作台时生效</small></span>
+          <select v-model="preferences.startPage">
+            <option value="library">资料库</option><option value="chat">问答</option>
+            <option v-if="capabilities?.learning_enabled || preferences.startPage === 'learning'" value="learning" :disabled="!capabilities?.learning_enabled">专题学习</option>
+          </select>
+        </label>
+        <p v-if="preferences.startPage === 'learning' && !capabilities?.learning_enabled" class="muted" role="status">首选专题学习当前不可用，启动时会进入资料库。首选项已保留。</p>
       </fieldset>
-      <fieldset class="settings-group action-stack">
+      <fieldset class="settings-group" @change="settingsNotice = ''">
         <legend>问答</legend>
-        <label>回车键行为<select v-model="preferences.enterSends">
-          <option :value="true">Enter 发送，Shift + Enter 换行</option>
-          <option :value="false">Enter 换行，通过发送按钮提交</option>
-        </select></label>
+        <label class="settings-row"><span>回车键行为</span>
+          <select v-model="preferences.enterSends">
+            <option :value="true">Enter 发送，Shift + Enter 换行</option>
+            <option :value="false">Enter 换行，通过发送按钮提交</option>
+          </select>
+        </label>
+        <div class="settings-reset inline-actions">
+          <button class="text-button" @click="restoreDefaults">恢复默认设置</button>
+          <p v-if="settingsNotice" class="muted" role="status">{{ settingsNotice }}</p>
+        </div>
       </fieldset>
-      <button class="btn secondary" @click="reset">恢复默认设置</button>
-      <fieldset class="settings-group action-stack">
+      <fieldset class="settings-group">
         <legend>账号与安全</legend>
-        <p><strong>{{ user.name }}</strong><br>{{ user.email }}</p>
+        <p class="account-identity"><strong>{{ user.name }}</strong><br><span class="muted">{{ user.email }}</span></p>
         <p v-if="accountError" class="alert error-alert" role="alert">{{ accountError }} 请重试退出。</p>
-        <button class="btn secondary" :disabled="signingOut" @click="signOut">{{ signingOut ? '正在退出…' : '退出登录' }}</button>
-        <button class="btn secondary" :disabled="signingOut" @click="security = true">退出所有设备</button>
+        <div class="inline-actions">
+          <button class="btn secondary" :disabled="signingOut" @click="signOut">{{ signingOut ? '正在退出…' : '退出登录' }}</button>
+          <button class="btn secondary" :disabled="signingOut" @click="security = true">退出所有设备</button>
+        </div>
       </fieldset>
       <button v-if="capabilities?.evaluation_enabled" class="btn secondary" @click="account = false; go('evaluations')">开发工具</button>
     </WorkspaceDialog>

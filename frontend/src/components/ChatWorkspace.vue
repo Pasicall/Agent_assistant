@@ -49,6 +49,32 @@ function createThread(scope: string | null, id = '') {
 }
 
 const current = ref(createThread(props.entry?.scope ?? ''))
+const conversationTitle = computed(() => current.value.id
+  ? history.value.find(item => item.id === current.value.id)?.title || current.value.messages.find(item => item.role === 'user')?.content.slice(0, 100) || '问答'
+  : '问答')
+const sourceOpener = ref<HTMLElement>()
+const selectedSource = computed(() => sources.value?.citations.find(item => item.chunk_id === sources.value?.selected))
+
+// Keep the reading position when the docked panel changes the width of the conversation.
+watch(() => !!sources.value, async () => {
+  const element = scroller.value
+  if (!element) return
+  const top = element.scrollTop
+  const atEnd = element.scrollHeight - top - element.clientHeight < 8
+  const viewport = element.getBoundingClientRect()
+  const message = Array.from(element.querySelectorAll('.message-content')).find(item => {
+    const bounds = item.getBoundingClientRect()
+    return bounds.bottom > viewport.top && bounds.top < viewport.bottom
+  })
+  const bounds = message?.getBoundingClientRect()
+  const line = bounds && document.caretRangeFromPoint?.(bounds.left + 2, Math.max(viewport.top, bounds.top) + 2)
+  const anchor = line && message?.contains(line.startContainer) ? line : message
+  const anchorTop = anchor?.getBoundingClientRect().top
+  await nextTick()
+  if (atEnd) element.scrollTop = element.scrollHeight
+  else if (anchor && anchorTop !== undefined) element.scrollTop += anchor.getBoundingClientRect().top - anchorTop
+  else element.scrollTop = top
+})
 const state = props.corpus.state
 const scopeMissing = computed(() => !!current.value.scope && state.loaded && !state.bases.some(kb => kb.id === current.value.scope))
 const hasSources = computed(() => current.value.scope !== null && state.loaded && !scopeMissing.value &&
@@ -246,7 +272,9 @@ function sourceAccessible(message: Message) {
   return !message.restricted && (!state.loaded || !message.citations?.some(citation => !state.documents.some(doc => doc.id === citation.document_id)))
 }
 
-async function showSource(message: Message, citation: Citation) {
+async function showSource(message: Message, citation: Citation, event: MouseEvent) {
+  historyOpen.value = false
+  sourceOpener.value = event.currentTarget as HTMLElement
   sources.value = {
     thread: current.value.localId, message: message.id, selected: citation.chunk_id,
     citations: [], loading: false, error: '', retryable: false,
@@ -269,12 +297,21 @@ async function readSources() {
       throw new ApiError('来源已删除或无权访问。', 404)
     }
     drawer.citations = saved.citations
-    await nextTick()
-    if (sources.value === drawer) document.getElementById(`source-${drawer.selected}`)?.scrollIntoView({ block: 'nearest' })
   } catch (error) {
     drawer.error = errorText(error)
     drawer.retryable = !(error instanceof ApiError && [401, 403, 404, 410].includes(error.status))
   } finally { drawer.loading = false }
+}
+
+async function selectSource(citation: Citation) {
+  const panel = sources.value
+  if (!panel || panel.selected === citation.chunk_id) return
+  panel.selected = citation.chunk_id
+  panel.error = ''
+  await nextTick()
+  const heading = document.getElementById('source-' + citation.chunk_id)?.querySelector('h3')
+  heading?.closest('dialog')?.scrollTo({ top: 0 })
+  heading?.focus({ preventScroll: true })
 }
 
 async function download(citation: Citation) {
@@ -320,40 +357,38 @@ onUnmounted(() => { disposed = true; for (const controller of controllers.values
 <template>
   <main class="chat-page">
     <div class="chat-workspace">
-      <details class="chat-history" :open="historyOpen" @toggle="historyOpen = ($event.target as HTMLDetailsElement).open">
-        <summary>会话历史{{ historyError ? '（暂未刷新）' : '' }}</summary>
-        <div class="chat-history-list">
-          <h2>会话历史</h2>
-          <p v-if="historyLoading && !historyLoaded" role="status">正在读取会话…</p>
-          <p v-if="historyError" role="alert">{{ historyError }} <button class="text-button" @click="loadHistory()">重试读取历史</button></p>
-          <p v-if="historyLoaded && !historyError && !history.length && !unsaved.length" class="muted">暂无历史会话。</p>
-          <button v-for="item in unsaved" :key="item.localId" class="text-button" @click="openThread(item)">未发送的草稿</button>
-          <div v-for="item in history" :key="item.id" class="history-row">
-            <button class="text-button" :aria-current="current.id === item.id ? 'true' : undefined" @click="openConversation(item.id)">{{ item.title }}</button>
-            <details>
-              <summary :aria-label="'更多操作 · ' + item.title">更多</summary>
-              <button class="text-button danger-button" :disabled="threads.some(thread => thread.id === item.id && thread.pending)" @click="pendingDelete = item">删除会话</button>
-            </details>
-          </div>
-        </div>
-      </details>
-
       <section class="chat-main">
-        <div class="chat-top">
-          <h1>问答</h1>
-          <button class="btn secondary" @click="start()"><Plus :size="16" />新建对话</button>
-        </div>
+        <header class="chat-top page-heading">
+          <h1>{{ conversationTitle }}</h1>
+          <div class="inline-actions chat-actions">
+            <details class="chat-history menu-popover" :open="historyOpen" @toggle="historyOpen = ($event.target as HTMLDetailsElement).open">
+              <summary class="btn secondary">会话历史{{ historyError ? '（暂未刷新）' : '' }}</summary>
+              <div class="chat-history-list">
+                <p v-if="historyLoading && !historyLoaded" role="status">正在读取会话…</p>
+                <p v-if="historyError" role="alert">{{ historyError }} <button class="text-button" @click="loadHistory()">重试读取历史</button></p>
+                <p v-if="historyLoaded && !historyError && !history.length && !unsaved.length" class="muted">暂无历史会话。</p>
+                <button v-for="item in unsaved" :key="item.localId" class="text-button" @click="openThread(item)">未发送的草稿</button>
+                <div v-for="item in history" :key="item.id" class="history-row">
+                  <button class="text-button" :aria-current="current.id === item.id ? 'true' : undefined" @click="openConversation(item.id)">{{ item.title }}</button>
+                  <details>
+                    <summary :aria-label="'更多操作 · ' + item.title">更多</summary>
+                    <button class="text-button danger-button" :disabled="threads.some(thread => thread.id === item.id && thread.pending)" @click="pendingDelete = item">删除会话</button>
+                  </details>
+                </div>
+              </div>
+            </details>
+            <button class="btn secondary" @click="start()"><Plus :size="17" />新建对话</button>
+          </div>
+        </header>
         <div ref="scroller" class="messages" @scroll="trackScroll">
           <p v-if="current.loading && !current.loaded" role="status">正在读取会话…</p>
-          <div v-else-if="current.loaded && !current.messages.length && !current.pending" class="chat-welcome">
-            <MessageSquare :size="28" /><h2>向你的资料提问</h2><p>回答附有来源，可按引用核对原文。</p>
-          </div>
           <article v-for="message in current.loaded ? current.messages : []" :key="message.id" class="message" :class="message.role">
             <div class="message-body">
               <div class="message-author">{{ message.role === 'assistant' ? '知衡助手' : '我' }}<small v-if="answerLabel(message.run_metadata)">{{ answerLabel(message.run_metadata) }}</small></div>
               <div class="message-content">{{ sourceAccessible(message) ? message.content : '此回答的来源已不可用，内容已隐藏。' }}</div>
               <div v-if="sourceAccessible(message) && message.citations?.length" class="message-citations">
-                <button v-for="(citation, index) in message.citations" :key="citation.chunk_id" @click="showSource(message, citation)">
+                <button v-for="(citation, index) in message.citations" :key="citation.chunk_id" :aria-expanded="sources?.message === message.id && sources.selected === citation.chunk_id"
+                  @click="showSource(message, citation, $event)">
                   <span>{{ index + 1 }}</span>{{ citation.document_name }}<small v-if="citation.page">第 {{ citation.page }} 页</small>
                 </button>
               </div>
@@ -366,6 +401,10 @@ onUnmounted(() => { disposed = true; for (const controller of controllers.values
         </div>
 
         <div class="composer-wrap">
+          <div v-if="current.loaded && !current.messages.length && !activeRequest" class="chat-welcome">
+            <MessageSquare :size="24" aria-hidden="true" />
+            <div><h2>向你的资料提问</h2><p>回答附有引用，可核对原文。</p></div>
+          </div>
           <button v-if="!followLatest" class="btn secondary return-latest" @click="jumpToLatest">回到最新回答</button>
           <p v-if="current.notice" class="workspace-notice" role="status">{{ current.notice }}</p>
           <p v-if="current.error" class="alert error-alert" role="alert">{{ current.error }} <button v-if="!current.loaded" class="text-button" @click="readThread(current)">重试读取</button></p>
@@ -384,7 +423,7 @@ onUnmounted(() => { disposed = true; for (const controller of controllers.values
               </label>
               <button v-if="activeRequest" class="btn secondary" type="button" @click="stop">停止生成</button>
               <button v-else-if="retryAvailable" class="btn primary" type="submit" :disabled="!canSend">重试原问题</button>
-              <button v-else class="send-button" type="submit" aria-label="发送问题" :disabled="!canSend"><ArrowUp :size="19" /></button>
+              <button v-else class="btn primary send-button" type="submit" aria-label="发送问题" :disabled="!canSend">发送<ArrowUp :size="16" /></button>
             </div>
           </form>
           <p v-if="current.id" class="composer-note">选择其他范围会开启新对话</p>
@@ -399,18 +438,27 @@ onUnmounted(() => { disposed = true; for (const controller of controllers.values
       </section>
     </div>
 
-    <WorkspaceDialog v-if="sources" title="回答来源" drawer @close="sources = undefined">
+    <WorkspaceDialog v-if="sources" title="回答来源" drawer dockable :return-focus="sourceOpener" @close="sources = undefined">
       <p v-if="sources.loading" role="status">正在核对来源…</p>
       <p v-if="sources.error" class="alert error-alert" role="alert">{{ sources.error }}
         <button v-if="sources.retryable" class="text-button" :disabled="sources.loading" @click="readSources">重试读取来源</button>
       </p>
-      <article v-for="citation in sources.citations" :id="'source-' + citation.chunk_id" :key="citation.chunk_id"
-        class="source-card" :class="{ focused: sources.selected === citation.chunk_id }">
-        <h3>{{ citation.document_name }}</h3><small>{{ citation.page ? `第 ${citation.page} 页` : '来源片段' }}</small>
-        <small v-if="citation.revision_id">引用版本 {{ citation.revision_id }}</small>
-        <blockquote>{{ citation.text }}</blockquote>
-        <button class="text-button" @click="download(citation)">下载原文</button>
+      <article v-if="selectedSource" :id="'source-' + selectedSource.chunk_id" :key="selectedSource.chunk_id" class="source-card focused citation-preview">
+        <h3 tabindex="-1">{{ selectedSource.document_name }}</h3>
+        <p class="source-meta muted">{{ selectedSource.page ? `第 ${selectedSource.page} 页` : '来源片段' }}
+          <span v-if="selectedSource.revision_id"> · 引用版本 {{ selectedSource.revision_id }}</span>
+        </p>
+        <button class="btn secondary" @click="download(selectedSource)">下载原文</button>
+        <blockquote>{{ selectedSource.text }}</blockquote>
       </article>
+      <nav v-if="sources.citations.length > 1 || (!selectedSource && sources.citations.length)" class="citation-list" aria-label="此回答的引用">
+        <h3>此回答的引用</h3>
+        <button v-for="(citation, index) in sources.citations" :key="citation.chunk_id" class="citation-option"
+          :aria-current="sources.selected === citation.chunk_id ? 'true' : undefined" @click="selectSource(citation)">
+          <span class="citation-index">{{ index + 1 }}</span>
+          <span>{{ citation.document_name }}<small v-if="citation.page"> · 第 {{ citation.page }} 页</small></span>
+        </button>
+      </nav>
     </WorkspaceDialog>
     <ConfirmAction v-if="pendingDelete" :title="'删除「' + pendingDelete.title + '」'"
       description="会移除此会话的所有问题和回答。删除无法撤销。" :action="removeConversation" @close="pendingDelete = undefined" />

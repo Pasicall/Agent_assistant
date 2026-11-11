@@ -118,7 +118,7 @@ async function setup(browser, width, options = {}) {
   const btn = name => page.getByRole('button', { name, exact: true })
   const visibleText = text => page.getByText(text, { exact: true }).filter({ visible: true }).first().waitFor()
   const nav = async name => {
-    if (width < 701) {
+    if (page.viewportSize().width < 900) {
       await btn('打开导航').click()
       await page.getByRole('dialog').getByRole('button', { name, exact: true }).click()
     } else if (name === '账号与设置') await btn(name).click()
@@ -166,8 +166,12 @@ async function core(browser, width) {
   await page.getByLabel('搜索资料名称').fill('nonexistent')
   await btn('清除搜索').click()
   assert.equal(await page.getByLabel('搜索资料名称').inputValue(), '')
-  await btn('事务.txt').click()
+  const fileRow = btn('事务.txt')
+  await fileRow.click()
   await visibleText('已读取的旧版文本')
+  const details = page.getByRole('dialog', { name: '事务.txt', exact: true })
+  assert.equal(await details.evaluate(el => el.matches(':modal')), width < 1200)
+  assert.equal(await fileRow.getAttribute('aria-expanded'), 'true')
   s.docs[0] = { ...s.docs[0], name: '新版本.txt', active_revision_id: 'v2' }
   s.versions = [{ id: 'v2', name: '新版本.txt', status: 'ready', active: true, created_at: date }]
   s.chunkFails = true
@@ -176,12 +180,13 @@ async function core(browser, width) {
   await visibleText('解析文本 · 事务.txt')
   await visibleText('已读取的旧版文本')
   await page.keyboard.press('Escape')
+  assert(await btn('新版本.txt').evaluate(el => el === document.activeElement))
   s.docs[0] = doc(); s.chunkFails = false; s.versions = [{ id: 'v1', name: '事务.txt', status: 'ready', active: true, created_at: date }]
   await refresh()
   await btn('基于此库提问').click()
   assert.equal(await page.getByLabel('本次范围').inputValue(), 'kb')
   const q = page.getByLabel('输入问题')
-  await page.locator('.chat-history > summary').evaluate(el => el.parentElement.open = true)
+  await page.locator('.chat-history > summary').click()
   await btn('无范围旧会话').click()
   await q.fill('继续旧问题')
   await visibleText('请先选择本次提问范围')
@@ -189,7 +194,7 @@ async function core(browser, width) {
   await page.getByLabel('本次范围').selectOption('')
   assert.equal(await q.inputValue(), '继续旧问题')
   await page.evaluate(() => localStorage.setItem('chat-scope:owner:gone', 'deleted'))
-  await page.locator('.chat-history > summary').evaluate(el => el.parentElement.open = true)
+  await page.locator('.chat-history > summary').click()
   await btn('库已删除会话').click()
   await visibleText('原知识库已不可用')
   await page.getByLabel('本次范围').selectOption('queue')
@@ -232,7 +237,7 @@ async function core(browser, width) {
   assert.equal(requests.length, 3)
   assert.deepEqual(requests[0], requests[1]); assert.deepEqual(requests[1], requests[2])
   assert.equal(await page.locator('.message.user').count(), 1)
-  await page.locator('.chat-history > summary').evaluate(el => el.parentElement.open = true)
+  await page.locator('.chat-history > summary').click()
   await btn('重试读取历史').waitFor()
   s.historyFails = false; await btn('重试读取历史').click()
   assert.equal(await page.evaluate(() => window.__chatRequests.length), 3)
@@ -247,6 +252,19 @@ async function core(browser, width) {
   assert(bounds.y >= 0 && bounds.y < 30, 'drawer close header remains visible')
   const selectedBounds = await page.locator('#source-chunk2').boundingBox()
   assert(selectedBounds.y >= bounds.y + bounds.height - 2 && selectedBounds.y < 850, 'selected citation must be visible')
+  const sourcePanel = page.getByRole('dialog', { name: '回答来源' })
+  assert.equal(await sourcePanel.evaluate(el => el.matches(':modal')), width < 1200)
+  if (width >= 1200) {
+    assert((await messages.boundingBox()).width >= 560)
+    assert(await cite.isVisible())
+  } else {
+    assert.equal((await sourcePanel.boundingBox()).width, width)
+  }
+  assert.equal(await page.locator('#source-chunk1').count(), 0)
+  await sourcePanel.locator('.citation-option').first().click()
+  await sourcePanel.locator('#source-chunk1.focused').waitFor()
+  await sourcePanel.locator('.citation-option').nth(1).click()
+  await sourcePanel.locator('#source-chunk2.focused').waitFor()
   const [download] = await Promise.all([page.waitForEvent('download'), page.locator('#source-chunk2').getByRole('button').click()])
   assert.equal(download.suggestedFilename(), '事务.txt')
   assert(s.requests.some(r => r.path === '/api/documents/d1/versions/v1/download'))
@@ -388,7 +406,7 @@ async function settings(t) {
   assert.equal(await page.locator('.app-shell').getAttribute('data-theme'), 'dark')
   await nav('账号与设置'); await btn('退出登录').click()
   s.user = { ...owner, id: 'other', email: 'other@test.local' }
-  await login(); await page.getByRole('heading', { name: '资料库', exact: true }).waitFor()
+  await login(); await page.getByRole('heading', { name: kb.name, exact: true }).waitFor()
   assert.equal(await page.locator('.app-shell').getAttribute('data-theme'), 'light')
 }
 
@@ -415,7 +433,7 @@ async function accountResume(browser, width) {
   await visibleText('登录已过期，请重新登录。')
   s.user = { ...owner, id: 'other' }
   await login()
-  await page.getByRole('heading', { name: '资料库', exact: true }).waitFor()
+  await page.getByRole('heading', { name: kb.name, exact: true }).waitFor()
   assert.equal(await page.locator('.upload-queue').count(), 0)
   assert.deepEqual(s.errors, [])
   await page.close()
@@ -433,7 +451,7 @@ async function preferenceEdges(browser, width) {
   assert.deepEqual(blocked.s.errors, [])
   await blocked.page.close()
   const fallback = await setup(browser, width, { caps: { ...caps, learning_enabled: false }, prefs: { 'zhiheng-preferences:owner': { startPage: 'learning', theme: 'bad', fontSize: 'bad', enterSends: 'bad' } } })
-  await fallback.page.getByRole('heading', { name: '资料库', exact: true }).waitFor()
+  await fallback.page.getByRole('heading', { name: kb.name, exact: true }).waitFor()
   await fallback.nav('账号与设置')
   await fallback.visibleText('首选专题学习当前不可用，启动时会进入资料库。首选项已保留。')
   assert.equal(await fallback.page.getByLabel('主题').inputValue(), 'light')
@@ -451,9 +469,43 @@ async function preferenceEdges(browser, width) {
   console.log(JSON.stringify({ width, cases: 'denied-storage/invalid-preferences/disabled-learning/startup-navigation-race', result: 'passed' }))
 }
 
+async function layoutEdges(browser) {
+  const docs = Array.from({ length: 32 }, (_, i) => doc('row-' + i, '物理资料 ' + i + '.txt'))
+  const { page, btn, fit } = await setup(browser, 1280, { docs })
+  const row = btn('物理资料 18.txt')
+  await row.evaluate(el => el.scrollIntoView({ block: 'center' }))
+  const anchor = await page.locator('.library-row').evaluateAll(rows => rows.findIndex(el => el.getBoundingClientRect().bottom > 0))
+  const anchorRow = page.locator('.library-row').nth(anchor)
+  const top = (await anchorRow.boundingBox()).y
+  await row.click()
+  const panel = page.getByRole('dialog', { name: '物理资料 18.txt', exact: true })
+  await panel.waitFor()
+  assert(Math.abs((await anchorRow.boundingBox()).y - top) <= 2, 'opening details should preserve the visible list row')
+  await page.keyboard.press('Escape')
+  assert(Math.abs((await anchorRow.boundingBox()).y - top) <= 2, 'closing details should preserve the visible list row')
+  assert(await row.evaluate(el => document.activeElement === el))
+
+  await row.click()
+  for (const width of [1200, 1199, 900, 899, 768, 767, 1200]) {
+    await page.setViewportSize({ width, height: 850 })
+    await page.waitForFunction(expected => document.querySelector('.library-page dialog[open]')?.matches(':modal') === expected, width < 1200)
+    assert.equal(await btn('打开导航').isVisible(), width < 900)
+    const panelWidth = (await panel.boundingBox()).width
+    if (width >= 1200) assert.equal(panelWidth, 360)
+    else if (width < 768) assert.equal(panelWidth, width)
+    else assert(panelWidth < width)
+    await fit()
+  }
+  assert(await panel.getByRole('button', { name: '关闭' }).isVisible())
+  await page.keyboard.press('Escape')
+  await page.close()
+  console.log(JSON.stringify({ cases: 'details-scroll-anchor/1200-900-768-layout-breakpoints', result: 'passed' }))
+}
+
 ;(async () => {
   const browser = await chromium.launch(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: 'chrome' })
   try {
     for (const width of [1280, 390]) { await core(browser, width); await preferenceEdges(browser, width); await accountResume(browser, width) }
+    await layoutEdges(browser)
   } finally { await browser.close() }
 })().catch(error => { console.error(error); process.exitCode = 1 })

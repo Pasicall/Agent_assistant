@@ -111,18 +111,18 @@ function saveExpiry() {
 </script>
 
 <template>
-  <WorkspaceDialog :title="document.name" drawer :busy="busy" @close="emit('close')">
-    <div class="inline-actions">
-      <button class="text-button" :disabled="busy" @click="mutate(() => downloadDocument(document.id, document.name, document.active_revision_id))">下载原文</button>
-    </div>
+  <WorkspaceDialog :title="document.name" drawer dockable :busy="busy" @close="emit('close')">
     <p>{{ documentStatus(document, restoring) }} · {{ document.source?.startsWith('folder:') ? '目录同步' : '上传' }}</p>
-    <p v-if="document.active_revision_id"><strong>{{ document.name }}</strong> · 当前使用 <time v-if="currentVersion">· {{ dateText(currentVersion.created_at) }}</time></p>
+    <p v-if="document.active_revision_id"><strong>当前使用版本</strong> <time v-if="currentVersion">· {{ dateText(currentVersion.created_at) }}</time></p>
     <p v-else class="muted">尚未发布可用版本</p>
     <p v-if="expired(document)">资料已过期，调整有效期后可用于新的问答。</p>
     <p v-else-if="available(document) && (processing(document) || document.error)">已发布的版本仍可用于新的问答。</p>
     <p v-if="job && processing(document)" role="status">{{ job.stage || '等待处理' }} · {{ Math.round(job.progress) }}%
       <span v-if="job.total_pages"> · {{ job.processed_pages || 0 }}/{{ job.total_pages }} 页</span>
     </p>
+    <div class="inline-actions">
+      <button class="btn secondary" :disabled="busy" @click="mutate(() => downloadDocument(document.id, document.name, document.active_revision_id))">下载原文</button>
+    </div>
     <div v-if="document.error" class="alert error-alert">
       <p>{{ document.error }}</p>
       <button v-if="!document.active_revision_id" class="text-button" :disabled="busy || processing(document)" @click="reprocess()">重新处理</button>

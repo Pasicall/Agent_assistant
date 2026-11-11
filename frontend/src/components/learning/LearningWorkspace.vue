@@ -389,15 +389,15 @@ onMounted(() => { void action(list) })
 
 <template>
   <main class="page learning-page">
-    <div class="page-heading">
-      <h1>专题学习</h1>
+    <header v-if="creating || !workspace" class="page-heading">
+      <h1>{{ creating ? '建立学习目标' : '专题学习' }}</h1>
       <button v-if="!creating && !workspace && summaries.length" class="btn secondary" :disabled="busy" @click="beginCreate()">新建专题</button>
-    </div>
+    </header>
     <p v-if="error" class="alert error-alert" role="alert">{{ error }} <button class="text-button" :disabled="busy" @click="action(update)">重试读取</button></p>
     <p v-if="notice" class="workspace-notice" role="status">{{ notice }}</p>
 
     <section v-if="creating" class="panel learning-panel">
-      <div class="section-heading"><h2>建立学习目标</h2><button class="text-button" :disabled="busy" @click="creating = false">取消</button></div>
+      <button class="text-button" :disabled="busy" @click="creating = false">取消</button>
       <p>当前支持数据库事务专题。从一个知识库选择 1–10 份可用资料。</p>
       <form class="action-stack" @submit.prevent="create">
         <label>知识库
@@ -421,18 +421,24 @@ onMounted(() => { void action(list) })
     </section>
 
     <template v-else-if="workspace">
-      <div class="inline-actions">
-        <button class="text-button" :disabled="busy" @click="back">返回全部专题</button>
-        <span class="outline-chip">{{ name(workspace.status) }}</span>
-        <details>
-          <summary>专题更多操作</summary>
-          <div class="action-stack">
-            <button class="text-button" :disabled="busy" @click="beginCreate(workspace)">以此为模板</button>
-            <button class="text-button danger-button" :disabled="busy" @click="removeConfirm = true">删除专题</button>
-          </div>
-        </details>
-      </div>
-      <h2 class="learning-goal">{{ workspace.goal_text }}</h2>
+      <header class="learning-header">
+        <div class="inline-actions learning-header-actions">
+          <button class="text-button" :disabled="busy" @click="back">返回全部专题</button>
+          <span class="outline-chip">{{ name(workspace.status) }}</span>
+          <details class="menu-popover">
+            <summary class="btn secondary">专题更多操作</summary>
+            <div class="menu-items">
+              <button class="text-button" :disabled="busy" @click="beginCreate(workspace)">以此为模板</button>
+              <button class="text-button danger-button" :disabled="busy" @click="removeConfirm = true">删除专题</button>
+            </div>
+          </details>
+        </div>
+        <h1 class="learning-goal">{{ workspace.goal_text }}</h1>
+        <div v-if="!['draft', 'generating', 'failed'].includes(workspace.status)" class="learning-tabs" aria-label="专题内容">
+          <button :aria-pressed="tab === 'task'" @click="tab = 'task'">{{ feedback ? '本次反馈' : '当前任务' }}</button>
+          <button :aria-pressed="tab === 'history'" @click="tab = 'history'; hint = undefined">学习记录</button>
+        </div>
+      </header>
       <div v-if="workspace.source_warning" class="alert error-alert" role="alert">
         {{ workspace.source_warning }} <button class="text-button" :disabled="busy" @click="beginCreate(workspace, true)">重新选择资料</button>
       </div>
@@ -444,11 +450,16 @@ onMounted(() => { void action(list) })
       </section>
 
       <section v-else-if="workspace.status === 'draft'" class="learning-plan">
-        <p>核对每项正式练习所需的资料。部分覆盖或缺少依据的能力会保留原覆盖状态。</p>
-        <article v-for="cap in workspace.capabilities" :id="'cap-' + cap.id" :key="cap.id" class="panel learning-panel" tabindex="-1">
-          <h3>{{ cap.title }}</h3>
-          <p><strong>你将能做什么</strong> {{ cap.observable_outcome }}</p>
-          <p class="muted">{{ { covered: '资料已覆盖', partial: '部分覆盖', missing: '缺少依据' }[cap.coverage_status] || cap.coverage_status }} · {{ cap.source_ids.length }} 段依据</p>
+        <div class="plan-progress">
+          <p role="status"><strong>已核对 {{ reviewedCount }} / {{ covered.length }} 项</strong></p>
+          <button v-if="!canConfirm" class="text-button" @click="focusUnchecked">查看待核对项</button>
+        </div>
+        <article v-for="cap in workspace.capabilities" :id="'cap-' + cap.id" :key="cap.id" class="panel learning-panel capability-card" tabindex="-1">
+          <div class="section-heading capability-heading">
+            <h3>{{ cap.title }}</h3>
+            <span class="status-badge" :class="{ ready: cap.coverage_status === 'covered', pending: cap.coverage_status === 'partial' }">{{ { covered: '资料已覆盖', partial: '部分覆盖', missing: '缺少依据' }[cap.coverage_status] || cap.coverage_status }}</span>
+          </div>
+          <p class="capability-outcome">{{ cap.observable_outcome }}</p>
           <details class="bound-sources">
             <summary>查看原文依据</summary>
             <p v-if="!cap.source_ids.length">尚未绑定依据，请从编辑入口选择原文。</p>
@@ -458,7 +469,7 @@ onMounted(() => { void action(list) })
               <blockquote>{{ workspace.sources.find(source => source.id === id)?.excerpt }}</blockquote>
             </article>
           </details>
-          <details @change="reviewed.delete(cap.id)">
+          <details class="capability-edit" @change="reviewed.delete(cap.id)">
             <summary>编辑目标与依据</summary>
             <div class="action-stack">
               <label>能力名称<input v-model="cap.title" maxlength="200" :disabled="busy" @input="reviewed.delete(cap.id)" /></label>
@@ -487,24 +498,18 @@ onMounted(() => { void action(list) })
             <input v-model="reviewed" type="checkbox" :value="cap.id" :disabled="busy" />已核对此项能力及其原文依据
           </label>
         </article>
-        <p role="status">已核对 {{ reviewedCount }} / {{ covered.length }} 项
-          <button v-if="!canConfirm" class="text-button" @click="focusUnchecked">查看待核对项</button>
-        </p>
-        <p v-if="planBlocker" class="workspace-notice">{{ planBlocker }}
-          <button v-if="workspace.source_warning || !covered.length || covered.some(cap => !hasUsableSources(cap))" class="text-button" :disabled="busy" @click="beginCreate(workspace, true)">重新选择资料</button>
-        </p>
-        <div class="inline-actions">
-          <button class="btn primary" :disabled="busy || !canConfirm || !!workspace.source_warning" @click="save(true)">确认目标并开始</button>
-          <button class="btn secondary" :disabled="busy || !!workspace.source_warning" @click="save()">保存草稿</button>
+        <div class="plan-footer">
+          <p v-if="planBlocker" class="muted">{{ planBlocker }}
+            <button v-if="workspace.source_warning || !covered.length || covered.some(cap => !hasUsableSources(cap))" class="text-button" :disabled="busy" @click="beginCreate(workspace, true)">重新选择资料</button>
+          </p>
+          <div class="inline-actions">
+            <button class="btn primary" :disabled="busy || !canConfirm || !!workspace.source_warning" @click="save(true)">确认目标并开始</button>
+            <button class="btn secondary" :disabled="busy || !!workspace.source_warning" @click="save()">保存草稿</button>
+          </div>
         </div>
       </section>
 
       <template v-else>
-        <div class="learning-tabs" aria-label="专题内容">
-          <button :class="{ active: tab === 'task' }" @click="tab = 'task'">{{ feedback ? '本次反馈' : '当前任务' }}</button>
-          <button :class="{ active: tab === 'history' }" @click="tab = 'history'; hint = undefined">学习记录</button>
-        </div>
-
         <section v-if="tab === 'history'" class="panel learning-panel">
           <h3>学习记录</h3>
           <p v-if="!history?.attempts.length">还没有作答记录。</p>
@@ -543,16 +548,6 @@ onMounted(() => { void action(list) })
             <summary>评价要求</summary>
             <ul><li v-for="item in task.rubric" :key="item.id">{{ item.description }}</li></ul>
           </details>
-          <p v-if="!modelReady" class="muted">评价模型未配置，仍可保存作答。</p>
-          <form class="action-stack" @submit.prevent="submit">
-            <label>你的作答<textarea :value="answer" rows="8" maxlength="10000" :disabled="busy || task.restricted || !!workspace.source_warning"
-              placeholder="草稿会保存在当前浏览器。" @input="editAnswer" /></label>
-            <div class="inline-actions">
-              <button class="btn primary" :disabled="busy || running || task.restricted || !!workspace.source_warning || !answer.trim()">提交作答</button>
-              <details v-if="!redoing"><summary>更多</summary><button class="text-button" type="button" :disabled="busy || running || !!workspace.source_warning" @click="skipConfirm = true">跳过</button></details>
-              <button v-else class="text-button" type="button" :disabled="busy" @click="redoing = false; action(update)">返回当前任务</button>
-            </div>
-          </form>
           <details class="task-help">
             <summary>需要提示{{ task.hint_level ? `（当前第 ${task.hint_level} 级）` : '' }}</summary>
             <p>查看原文会记录为第 2 级帮助。阅读完整解析后的作答会按有帮助的口径评价。</p>
@@ -562,6 +557,19 @@ onMounted(() => { void action(list) })
             </div>
             <LearningHint v-if="hint" :hint="hint" @download="download" />
           </details>
+          <p v-if="!modelReady" class="muted">评价模型未配置，仍可保存作答。</p>
+          <form class="action-stack" @submit.prevent="submit">
+            <label>你的作答<textarea :value="answer" rows="8" maxlength="10000" :disabled="busy || task.restricted || !!workspace.source_warning"
+              placeholder="草稿会保存在当前浏览器。" @input="editAnswer" /></label>
+            <div class="inline-actions">
+              <button class="btn primary" :disabled="busy || running || task.restricted || !!workspace.source_warning || !answer.trim()">提交作答</button>
+              <details v-if="!redoing" class="menu-popover">
+                <summary class="btn secondary">更多</summary>
+                <div class="menu-items"><button class="text-button" type="button" :disabled="busy || running || !!workspace.source_warning" @click="skipConfirm = true">跳过</button></div>
+              </details>
+              <button v-else class="text-button" type="button" :disabled="busy" @click="redoing = false; action(update)">返回当前任务</button>
+            </div>
+          </form>
         </section>
 
         <section v-else class="panel learning-panel">
@@ -573,19 +581,19 @@ onMounted(() => { void action(list) })
       </template>
     </template>
 
-    <section v-else class="panel learning-panel">
+    <section v-else class="learning-index">
       <p v-if="!listLoaded && !error" role="status">正在读取专题…</p>
       <template v-if="listLoaded">
-        <div v-if="continueWith" class="section-heading">
+        <div v-if="continueWith" class="panel section-heading learning-resume">
           <h2>{{ continueWith.goal_text }}</h2>
           <button class="btn primary" :disabled="busy" @click="open(continueWith.id)">继续学习</button>
         </div>
-        <div v-if="!summaries.length">
+        <div v-if="!summaries.length" class="panel learning-panel">
           <h2>从一个具体目标开始</h2><p>选择资料，练习解释和分析数据库事务场景。</p>
           <button class="btn primary" :disabled="busy" @click="beginCreate()">新建专题</button>
         </div>
         <ul v-else class="workspace-list">
-          <li v-for="item in summaries" :key="item.id" class="history-row">
+          <li v-for="item in summaries.filter(entry => entry.id !== continueWith?.id)" :key="item.id" class="history-row">
             <button class="text-button" :disabled="busy" @click="open(item.id)">{{ item.goal_text }}</button><small>{{ name(item.status) }}</small>
           </li>
         </ul>
