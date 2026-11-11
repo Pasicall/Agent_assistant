@@ -16,18 +16,23 @@ class CapabilityEdit(StrictRequest):
     id: str
     title: str = Field(min_length=1, max_length=200)
     observable_outcome: str = Field(min_length=1, max_length=2000)
-    prerequisite_ids: list[str] = Field(max_length=3)
+    prerequisite_ids: list[str] = Field(max_length=4)
     source_ids: list[str] = Field(max_length=12)
-    coverage_status: Literal["covered", "partial", "missing"]
+    coverage_status: Literal["covered", "partial", "missing", "pending_review"]
 
 
 class PlanEdit(StrictRequest):
     state_version: int = Field(ge=0)
-    capabilities: list[CapabilityEdit] = Field(min_length=3, max_length=3)
+    capabilities: list[CapabilityEdit] = Field(min_length=1, max_length=5)
 
 
 class VersionRequest(StrictRequest):
     state_version: int = Field(ge=0)
+
+
+class ConfirmRequest(VersionRequest):
+    capability_ids: list[str] | None = Field(default=None, min_length=1, max_length=5)
+    request_key: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class HintRequest(StrictRequest):
@@ -65,8 +70,11 @@ class ObstacleCandidate(StrictRequest):
     alternative_explanation: str = Field(min_length=1, max_length=1000)
 
 
-class AssessmentResult(StrictRequest):
+class GeneralAssessmentResult(StrictRequest):
     criteria: list[CriterionResult] = Field(min_length=1, max_length=5)
-    obstacle_candidates: list[ObstacleCandidate] = Field(max_length=4)
     feedback: str = Field(min_length=1, max_length=2000)
     reveals_solution: bool
+
+
+class AssessmentResult(GeneralAssessmentResult):
+    obstacle_candidates: list[ObstacleCandidate] = Field(max_length=4)

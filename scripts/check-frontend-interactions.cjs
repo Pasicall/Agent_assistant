@@ -87,7 +87,14 @@ async function setup(browser, width, options = {}) {
         { id: 'm1', role: 'assistant', content: '历史回答', citations: s.sourceMissing ? [] : (s.citations || citations) },
       ] })
     }
-    if (path === '/api/learning/workspaces') return json([s.workspace])
+    if (path === '/api/learning/workspaces') {
+      if (s.caps.learning_general_enabled && method === 'POST') {
+        s.createdGoal = request.postDataJSON()
+        s.workspace.goal_text = s.createdGoal.goal_text
+        return json({ workspace_id: 'w' }, 202)
+      }
+      return json(!s.caps.learning_general_enabled || s.createdGoal ? [s.workspace] : [])
+    }
     if (path === '/api/learning/workspaces/w') return json(s.workspace)
     if (path.endsWith('/w/history')) return json({ attempts: s.attempts, hints: [], decisions: s.attempts.some(a => a.assessment_status === 'completed') ? [{ id: 'decision', trigger_attempt_id: 'a1', reason: '通过变式验证迁移', status: 'active' }] : [] })
     if (path.endsWith('/w/plan')) {
@@ -96,9 +103,25 @@ async function setup(browser, width, options = {}) {
     }
     if (path.endsWith('/w/confirm')) {
       if (s.confirmFails) return json({ detail: '确认暂时失败' }, 503)
+      if (s.workspace.plan_version === 2) {
+        const payload = request.postDataJSON()
+        assert.deepEqual(payload.capability_ids, ['cap1'])
+        assert.equal(payload.state_version, s.workspace.state_version)
+        const job = { id: 'practice1', kind: 'practice', status: 'queued', input_version: ++s.workspace.state_version,
+          capability_ids: payload.capability_ids, stage: '正在核验练习' }
+        s.workspace = { ...s.workspace, status: 'preparing', jobs: [job] }
+        return json({ ...s.workspace, job }, 202)
+      }
       s.workspace = { ...s.workspace, status: 'active', current_task_id: 't1' }
       return json(s.workspace)
     }
+    if (path.endsWith('/jobs/practice1/retry')) {
+      s.workspace.status = 'preparing'
+      const job = s.workspace.jobs[0]
+      Object.assign(job, { status: 'queued', error: null, stage: '正在核验练习' })
+      return json(job)
+    }
+    if (path.endsWith('/tasks/t1') && s.workspace.plan_version === 2) return json({ ...task('t1'), prompt: '根据合外力和质量计算加速度' })
     if (path.endsWith('/tasks/t1') || path.endsWith('/tasks/t2')) return json({ ...task(path.split('/').pop()), hint_level: s.hintLevel || 0 })
     if (path.endsWith('/t1/hints')) { s.hintLevel = request.postDataJSON().level; return json({ level: s.hintLevel, text: '先核对并发时序', sources: [] }) }
     if (path.endsWith('/t1/attempts')) {
@@ -502,10 +525,63 @@ async function layoutEdges(browser) {
   console.log(JSON.stringify({ cases: 'details-scroll-anchor/1200-900-768-layout-breakpoints', result: 'passed' }))
 }
 
+async function generalLearning(browser, width) {
+  const draft = { ...workspace(), plan_version: 2, tasks: [] }
+  draft.capabilities[0].coverage_details = { gap: '', evidence: [{ source_id: 's1', quote: '质量和加速度的关系' }] }
+  const { page, s, btn, nav, visibleText, fit } = await setup(browser, width, {
+    caps: { ...caps, learning_general_enabled: true, learning_assessment_configured: true },
+    workspace: draft,
+    bases: [kb],
+  })
+  await nav('专题学习')
+  await btn('新建专题').click()
+  const goal = page.getByLabel('学习目标')
+  assert.equal(await goal.inputValue(), '')
+  assert.equal(await page.getByText(/当前支持数据库事务专题/).count(), 0)
+  const text = '根据牛顿第二定律计算物体加速度并解释单位'
+  await goal.fill(text)
+  await page.getByRole('group', { name: '选择资料' }).getByRole('checkbox', { name: /事务.txt/ }).check()
+  await btn('生成能力草稿').click()
+  const card = page.locator('#cap-cap1')
+  await card.getByText('查看原文依据', { exact: true }).click()
+  await card.getByText(/核验原句.*质量和加速度的关系/).waitFor()
+  assert.equal(s.createdGoal.goal_text, text)
+  await card.getByText('编辑目标与依据', { exact: true }).click()
+  await card.getByLabel('能力名称').fill('计算加速度')
+  await card.getByText('待复核', { exact: true }).filter({ visible: true }).first().waitFor()
+  const review = card.getByRole('checkbox', { name: '已核对此项能力及其原文依据' })
+  await review.check()
+  await btn('确认目标并开始').click()
+  await page.getByText(/确认暂时失败/).waitFor()
+  s.confirmFails = false
+  await btn('确认目标并开始').click()
+  await page.getByRole('heading', { name: '正在准备练习' }).waitFor()
+  const confirms = s.requests.filter(item => item.path.endsWith('/w/confirm')).map(item => JSON.parse(item.body))
+  assert.deepEqual(confirms[0], confirms[1])
+  assert.deepEqual(confirms[1].capability_ids, ['cap1'])
+  assert.equal(s.requests.filter(item => item.path.endsWith('/w/plan')).length, 1)
+  s.workspace.status = 'draft'
+  Object.assign(s.workspace.jobs[0], { status: 'failed', error: '练习核验失败', failed_capability_id: 'cap1' })
+  await btn('查看失败能力').click()
+  assert.equal(await page.evaluate(() => document.activeElement.id), 'cap-cap1')
+  assert(await review.isChecked())
+  await btn('重试准备练习').click()
+  await page.getByRole('heading', { name: '正在准备练习' }).waitFor()
+  Object.assign(s.workspace, { status: 'active', current_task_id: 't1', tasks: [task('t1')] })
+  s.workspace.jobs[0].status = 'completed'
+  await visibleText('根据合外力和质量计算加速度')
+  await page.getByLabel('你的作答').fill('加速度等于合外力除以质量')
+  assert(await btn('提交作答').isEnabled())
+  await fit()
+  assert.deepEqual(s.errors, [])
+  await page.close()
+  console.log(JSON.stringify({ width, cases: 'general-create/review/confirm-replay/practice-retry', result: 'passed' }))
+}
+
 ;(async () => {
   const browser = await chromium.launch(process.env.CHROME_EXECUTABLE ? { executablePath: process.env.CHROME_EXECUTABLE } : { channel: 'chrome' })
   try {
-    for (const width of [1280, 390]) { await core(browser, width); await preferenceEdges(browser, width); await accountResume(browser, width) }
+    for (const width of [1280, 390]) { await core(browser, width); await preferenceEdges(browser, width); await accountResume(browser, width); await generalLearning(browser, width) }
     await layoutEdges(browser)
   } finally { await browser.close() }
 })().catch(error => { console.error(error); process.exitCode = 1 })

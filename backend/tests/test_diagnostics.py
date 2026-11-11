@@ -40,6 +40,7 @@ def test_learner_capabilities_and_disabled_routes(client, monkeypatch, tmp_path)
     assert client.get('/api/capabilities', headers=owner).json() == {
         'max_upload_mb': settings.max_upload_mb,
         'learning_enabled': True,
+        'learning_general_enabled': False,
         'learning_assessment_configured': False,
         'evaluation_enabled': False,
         'folder_sync_available': False,

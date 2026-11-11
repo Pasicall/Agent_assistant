@@ -29,7 +29,7 @@ def source_state(db, user_id, source):
     return "historical" if doc.active_revision_id != source.revision_id else "current"
 
 
-def check_sources(db, workspace, source_ids, for_work=True):
+def check_sources(db, workspace, source_ids, for_work=True, *, require_current=False, lock=False):
     rows = db.scalars(
         select(LearningSourceSnapshot).where(
             LearningSourceSnapshot.workspace_id == workspace.id, LearningSourceSnapshot.id.in_(source_ids)
@@ -37,10 +37,20 @@ def check_sources(db, workspace, source_ids, for_work=True):
     ).all()
     if not rows or len(rows) != len(set(source_ids)):
         raise HTTPException(409, "任务缺少可用的来源依据，请补充资料并新建专题草稿")
-    if any(
-        source_state(db, workspace.user_id, s) in ({"expired", "unavailable"} if for_work else {"unavailable"})
-        for s in rows
+    if lock:
+        db.execute(
+            select(Document.id).where(Document.id.in_({row.document_id for row in rows}))
+            .order_by(Document.id).with_for_update()
+        ).all()
+    states = {source_state(db, workspace.user_id, row) for row in rows}
+    if require_current and (
+        states != {"current"} or any(
+            row.knowledge_base_id != workspace.knowledge_base_id or row.document_id not in workspace.selected_document_ids
+            for row in rows
+        )
     ):
+        raise HTTPException(409, "原文版本已变化或不属于所选资料，请重新核对")
+    if states & ({"expired", "unavailable"} if for_work else {"unavailable"}):
         raise HTTPException(409, "来源已删除、过期或不再可访问，请补充资料并新建专题草稿")
     return rows
 
@@ -77,8 +87,10 @@ def redact_document(db, document_id):
             source.excerpt = ""
         for cap in db.scalars(select(LearningCapability).where(LearningCapability.workspace_id == wid)):
             cap.title, cap.observable_outcome, cap.coverage_status = "来源已删除的能力", "", "missing"
+            cap.coverage_details = None
         for task in db.scalars(select(LearningTask).where(LearningTask.workspace_id == wid)):
             task.prompt, task.hints, task.rubric = "", [], []
+            task.generation_details = None
         for attempt in db.scalars(select(LearningAttempt).where(LearningAttempt.workspace_id == wid)):
             attempt.assessment = {}
         for decision in db.scalars(select(LearningDecision).where(LearningDecision.workspace_id == wid)):

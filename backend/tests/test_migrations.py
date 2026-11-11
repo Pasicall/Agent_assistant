@@ -41,4 +41,43 @@ def test_runtime_metadata_excludes_enterprise_models_but_keeps_frozen_tables(cli
     assert models.Base.metadata.sorted_tables  # Compatibility foreign keys still resolve.
     assert legacy_tables <= set(inspect(client.app.state.database.engine).get_table_names())
     with client.app.state.database.session() as db:
-        assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '007_learning'
+        assert db.execute(text('SELECT version_num FROM alembic_version')).scalar_one() == '008_learning_general'
+
+
+def test_learning_v1_draft_and_queued_job_survive_upgrade(tmp_path):
+    from pathlib import Path
+
+    import migrations
+    from alembic import command
+    from alembic.config import Config
+    from app.config import Settings
+    from app.db import Database
+    from app.models import LearningJob, LearningWorkspace, User
+    from migrations.learning_v1 import Base
+
+    settings = Settings(_env_file=None, database_url='sqlite:///' + (tmp_path / 'learning-v1.db').as_posix())
+    database = Database(settings)
+    config = Config()
+    config.set_main_option("script_location", str(Path(migrations.__file__).parent))
+    with database.engine.begin() as connection:
+        config.attributes["connection"] = connection
+        command.upgrade(config, "007_learning")
+        connection.execute(User.__table__.insert().values(
+            id="owner", email="legacy-learning@example.test", name="旧用户", password_hash="x",
+        ))
+        connection.execute(Base.metadata.tables["learning_workspaces"].insert().values(
+            id="old-workspace", user_id="owner", goal_text="学习数据库事务隔离性",
+            status="generating", plan_version=1, state_version=0,
+        ))
+        connection.execute(Base.metadata.tables["learning_jobs"].insert().values(
+            id="old-job", user_id="owner", workspace_id="old-workspace", request_key="old-request",
+            kind="plan", target_id="old-workspace", body_hash="legacy-hash", status="queued",
+        ))
+    database.initialize()
+    with database.session() as db:
+        workspace = db.get(LearningWorkspace, "old-workspace")
+        job = db.get(LearningJob, "old-job")
+        assert workspace.plan_version == 1 and workspace.goal_text == "学习数据库事务隔离性"
+        assert workspace.source_fingerprint is None
+        assert job.status == "queued" and job.input_payload is None
+    database.engine.dispose()

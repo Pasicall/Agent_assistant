@@ -580,6 +580,7 @@ def workspace_capabilities(request: Request, user: CurrentUser):
     return {
         "max_upload_mb": settings.max_upload_mb,
         "learning_enabled": settings.learning_enabled,
+        "learning_general_enabled": settings.learning_enabled and settings.learning_general_enabled,
         "learning_assessment_configured": settings.learning_enabled and bool(
             settings.llm_model and (settings.llm_provider == "ollama" or settings.llm_api_key)
         ),

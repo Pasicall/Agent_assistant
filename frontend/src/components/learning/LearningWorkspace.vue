@@ -2,14 +2,14 @@
 import { readLocal, writeLocal, removeLocal } from '../../storage'
 import { computed, onMounted, ref, toRef } from 'vue'
 import { ApiError, downloadDocument, type Document, type KnowledgeBase } from '../../api'
-import { learning, type Attempt, type Capability, type LearningHistory, type LearningTask, type Source, type Workspace, type WorkspaceSummary } from '../../api/learning'
-import { available, dateText, errorText, record, useVisiblePolling } from '../../workspace'
+import { learning, planEdits, type Attempt, type Capability, type LearningHistory, type LearningTask, type Source, type Workspace, type WorkspaceSummary } from '../../api/learning'
+import { available, dateText, documentStatus, errorText, record, useVisiblePolling } from '../../workspace'
 import ConfirmAction from '../ConfirmAction.vue'
 import WorkspaceDialog from '../WorkspaceDialog.vue'
 import LearningFeedback from './LearningFeedback.vue'
 import LearningHint from './LearningHint.vue'
 
-const props = defineProps<{ knowledgeBases: KnowledgeBase[]; documents: Document[]; userId: string; modelReady: boolean; active: boolean }>()
+const props = defineProps<{ knowledgeBases: KnowledgeBase[]; documents: Document[]; userId: string; modelReady: boolean; generalEnabled?: boolean; active: boolean }>()
 const emit = defineEmits<{ upload: [id: string] }>()
 const summaries = ref<WorkspaceSummary[]>([])
 const workspace = ref<Workspace>()
@@ -27,7 +27,8 @@ const notice = ref('')
 const tab = ref<'task' | 'history'>('task')
 const kbId = ref('')
 const documentIds = ref<string[]>([])
-const goal = ref('我想理解数据库事务，并能分析并发场景下的数据异常。')
+const transactionGoal = '我想理解数据库事务，并能分析并发场景下的数据异常。'
+const goal = ref(props.generalEnabled ? '' : transactionGoal)
 const reviewed = ref(new Set<string>())
 const answer = ref('')
 const hint = ref<{ level: number; text: string; sources: Source[] }>()
@@ -42,6 +43,8 @@ const draftKey = (id: string) => `learning-draft:${props.userId}:${id}`
 const seenKey = (id: string) => `learning-feedback:${props.userId}:${id}`
 type RequestKey = { signature: string; key: string }
 let creation: RequestKey | undefined
+let confirmation: RequestKey | undefined
+const savedDraft = ref('')
 let submission: RequestKey | undefined
 let advancement: RequestKey | undefined
 let helpRequest: RequestKey | undefined
@@ -55,35 +58,64 @@ const ongoing = computed(() => summaries.value.filter(item => !['completed', 'fa
 const continueWith = computed(() => ongoing.value.find(item => item.id === readLocal(currentKey)) || ongoing.value[0])
 const running = computed(() => ['queued', 'running'].includes(feedback.value?.assessment_status || '') ||
   (workspace.value?.jobs.some(job => ['queued', 'running'].includes(job.status)) ?? false))
-const planJob = computed(() => workspace.value?.jobs.find(job => job.kind !== 'assessment'))
+const planJob = computed(() => workspace.value?.jobs.find(job => job.kind === 'plan'))
+const practiceJob = computed(() => workspace.value?.jobs.find(job => job.kind === 'practice'))
 const assessmentJob = computed(() => workspace.value?.jobs.find(job => job.kind === 'assessment' && job.target_id === feedback.value?.id))
 const decision = computed(() => history.value?.decisions.find(item => item.trigger_attempt_id === feedback.value?.id && item.status !== 'superseded'))
 const currentCap = computed(() => workspace.value?.capabilities.find(cap => cap.id === task.value?.capability_id))
-const covered = computed(() => workspace.value?.capabilities.filter(cap => cap.coverage_status === 'covered') || [])
+const generalPlan = computed(() => workspace.value?.plan_version === 2)
+const draftChanged = computed(() => !!workspace.value && JSON.stringify(planEdits(workspace.value)) !== savedDraft.value)
+function eligible(cap: Capability) {
+  return cap.coverage_status === 'covered' || (generalPlan.value && cap.coverage_status === 'pending_review')
+}
+const covered = computed(() => workspace.value?.capabilities.filter(eligible) || [])
 function hasUsableSources(cap: Capability) {
   return cap.source_ids.length > 0 && cap.source_ids.every(id => {
     const source = workspace.value?.sources.find(item => item.id === id)
-    return source && !['unavailable', 'expired'].includes(source.state || '')
+    return source && (generalPlan.value ? source.state === 'current' : !['unavailable', 'expired'].includes(source.state || ''))
   })
 }
 const unchecked = computed(() => covered.value.filter(cap => !reviewed.value.has(cap.id) || !hasUsableSources(cap)))
 const reviewedCount = computed(() => covered.value.length - unchecked.value.length)
-const canConfirm = computed(() => covered.value.length > 0 && !unchecked.value.length)
+const selectedCaps = computed(() => covered.value.filter(cap => reviewed.value.has(cap.id) && hasUsableSources(cap)))
+const selectedIds = computed(() => new Set(selectedCaps.value.map(cap => cap.id)))
+const missingPrerequisite = computed(() => selectedCaps.value.find(cap => cap.prerequisite_ids.some(id => !selectedIds.value.has(id))))
+const canConfirm = computed(() => generalPlan.value
+  ? props.modelReady && selectedIds.value.size > 0 && !missingPrerequisite.value
+  : covered.value.length > 0 && !unchecked.value.length)
+const canRetryPractice = computed(() => practiceJob.value?.status === 'failed' &&
+  practiceJob.value.input_version === workspace.value?.state_version && !draftChanged.value &&
+  !workspace.value?.source_warning && props.modelReady)
 const planBlocker = computed(() => {
   if (workspace.value?.source_warning) return '来源已失效，请重新选择资料。'
+  if (generalPlan.value && !props.modelReady) return '生成模型尚未配置，草稿已保留。'
   if (!covered.value.length) return '尚无资料已覆盖的能力，请查看原文并编辑覆盖状态，或补充资料。'
+  if (generalPlan.value) {
+    if (!selectedIds.value.size) return '请选择至少一项已绑定原文的能力并完成核对。'
+    if (missingPrerequisite.value) return '请一并核对所选能力依赖的先修目标。'
+    return ''
+  }
   if (covered.value.some(cap => !hasUsableSources(cap))) return '已覆盖的能力中有原文依据缺失或失效，请补充绑定或重新选择资料。'
   return unchecked.value.length ? '请逐项查看原文依据并核对。' : ''
 })
-function focusUnchecked() {
-  const cap = unchecked.value[0] || workspace.value?.capabilities[0]
-  if (!cap) return
-  const element = document.getElementById('cap-' + cap.id)
+function focusCapability(id = (unchecked.value[0] || workspace.value?.capabilities[0])?.id) {
+  if (!id) return
+  const element = document.getElementById('cap-' + id)
   element?.scrollIntoView({ block: 'center', behavior: 'smooth' })
   element?.focus({ preventScroll: true })
 }
+function editCapability(cap: Capability, recheck = true) {
+  reviewed.value.delete(cap.id)
+  if (generalPlan.value && recheck) {
+    cap.coverage_status = cap.source_ids.length ? 'pending_review' : 'missing'
+    cap.coverage_details = null
+  }
+}
+const coverageLabels: Record<string, string> = {
+  covered: '资料已覆盖', partial: '部分覆盖', missing: '缺少依据', pending_review: '待复核',
+}
 const hintNames = ['提醒条件', '查看相关原文', '局部示例', '完整解析']
-const labels: Record<string, string> = { generating: '生成草稿中', draft: '待确认目标', active: '学习中', completed: '验证完成', needs_practice: '需要更多练习', failed: '待重试', queued: '排队中', running: '评价中', unverified: '尚未验证', needs_evidence: '需要补充证据', assisted: '帮助下完成', independent: '独立完成', transfer_verified: '变式验证通过', suspected: '疑似障碍', confirmed: '有重复证据', disputed: '判断有争议', resolved: '已有解除依据', met: '满足标准', partial: '部分满足', not_met: '尚未满足', insufficient_evidence: '证据不足', pending: '待完成', skipped: '已跳过', current: '当前版本', historical: '历史版本', expired: '已过期', unavailable: '来源不可用', stock_value_vs_order_count: '库存值与订单数混淆', interleaving: '交错执行理解', prevention: '防护方法不足', expression: '表达需要补充' }
+const labels: Record<string, string> = { generating: '生成草稿中', preparing: '正在准备练习', draft: '待确认目标', active: '学习中', completed: '验证完成', needs_practice: '需要更多练习', failed: '待重试', queued: '排队中', running: '评价中', unverified: '尚未验证', needs_evidence: '需要补充证据', assisted: '帮助下完成', independent: '独立完成', transfer_verified: '变式验证通过', suspected: '疑似障碍', confirmed: '有重复证据', disputed: '判断有争议', resolved: '已有解除依据', met: '满足标准', partial: '部分满足', not_met: '尚未满足', insufficient_evidence: '证据不足', pending: '待完成', skipped: '已跳过', current: '当前版本', historical: '历史版本', expired: '已过期', unavailable: '来源不可用', stock_value_vs_order_count: '库存值与订单数混淆', interleaving: '交错执行理解', prevention: '防护方法不足', expression: '表达需要补充' }
 const name = (v: string) => labels[v] || v
 function sourceName(id: string) {
   const source = workspace.value?.sources.find(item => item.id === id)
@@ -137,6 +169,7 @@ async function readWorkspace(id: string, enter = false, ticket = sequence) {
     redoing.value = false
   }
   workspace.value = next
+  savedDraft.value = JSON.stringify(planEdits(next))
   history.value = records
   if (show) {
     if (enter) openFeedback(show, nextTask)
@@ -184,7 +217,7 @@ function open(id: string) {
     await readWorkspace(id, true)
     if (!workspace.value) return
     writeLocal(currentKey, id)
-    reviewed.value.clear()
+    reviewed.value = new Set(canRetryPractice.value ? practiceJob.value?.capability_ids : undefined)
     creating.value = false
     tab.value = 'task'
   })
@@ -215,6 +248,7 @@ function beginCreate(template?: Workspace, reselect = false) {
 
 function create() {
   return action(async () => {
+    if (props.generalEnabled && !props.modelReady) return
     if (!chosen.value.length || chosen.value.length > 10 || goal.value.trim().length < 10) return
     const body = { knowledge_base_id: kbId.value, document_ids: chosen.value, goal_text: goal.value.trim() }
     creation = requestFor(JSON.stringify(body), creation)
@@ -234,11 +268,23 @@ function create() {
 function save(confirm = false) {
   return action(async () => {
     if (!workspace.value || (confirm && !canConfirm.value)) return
-    workspace.value = await learning.save(workspace.value)
-    notice.value = '草稿已保存。'
+    if (!confirm || !generalPlan.value || draftChanged.value) {
+      workspace.value = await learning.save(workspace.value)
+      savedDraft.value = JSON.stringify(planEdits(workspace.value))
+      notice.value = '草稿已保存。'
+    }
     if (confirm) {
-      workspace.value = await learning.confirm(workspace.value)
-      notice.value = '目标已确认。'
+      const w = workspace.value
+      if (generalPlan.value) {
+        const ids = [...selectedIds.value].sort()
+        confirmation = requestFor(JSON.stringify([w.id, w.state_version, ids]), confirmation)
+        workspace.value = await learning.confirm(w, { capability_ids: ids, request_key: confirmation.key })
+        confirmation = undefined
+        notice.value = '目标已提交核验。'
+      } else {
+        workspace.value = await learning.confirm(w)
+        notice.value = '目标已确认。'
+      }
       await savedRefresh(workspace.value.id)
     }
   })
@@ -328,6 +374,10 @@ function retry(id: string) {
     if (!workspace.value) return
     const updated = await learning.retry(id)
     workspace.value.jobs = workspace.value.jobs.map(job => job.id === id ? updated : job)
+    if (['queued', 'running'].includes(updated.status)) {
+      if (updated.kind === 'practice') workspace.value.status = 'preparing'
+      else if (updated.kind === 'plan') workspace.value.status = 'generating'
+    }
     if (feedback.value && updated.target_id === feedback.value.id) feedback.value.assessment_status = 'queued'
     notice.value = '已重新提交原任务。'
     await savedRefresh(workspace.value.id)
@@ -398,7 +448,9 @@ onMounted(() => { void action(list) })
 
     <section v-if="creating" class="panel learning-panel">
       <button class="text-button" :disabled="busy" @click="creating = false">取消</button>
-      <p>当前支持数据库事务专题。从一个知识库选择 1–10 份可用资料。</p>
+      <p v-if="generalEnabled">从一个知识库选择 1–10 份可用资料，写下你想学会什么。</p>
+      <p v-else>当前支持数据库事务专题。从一个知识库选择 1–10 份可用资料。</p>
+      <p v-if="generalEnabled && !modelReady" class="alert error-alert">通用专题需要配置生成模型。可以先填写目标和选择资料。</p>
       <form class="action-stack" @submit.prevent="create">
         <label>知识库
           <select v-model="kbId" required :disabled="busy" @change="documentIds = []">
@@ -406,17 +458,18 @@ onMounted(() => { void action(list) })
             <option v-for="kb in knowledgeBases" :key="kb.id" :value="kb.id">{{ kb.name }}</option>
           </select>
         </label>
-        <label>学习目标<textarea v-model="goal" rows="3" minlength="10" maxlength="1000" :disabled="busy" required /></label>
+        <label>学习目标<textarea v-model="goal" rows="3" minlength="10" maxlength="1000" :disabled="busy"
+            :placeholder="generalEnabled ? '例如：根据牛顿第二定律，计算加速度并说明方向和单位' : transactionGoal" required /></label>
         <fieldset>
           <legend>选择资料</legend>
           <p v-if="!options.some(available)">当前库没有可用资料。 <button class="text-button" type="button" @click="emit('upload', kbId)">上传资料</button></p>
           <label v-for="doc in options" :key="doc.id" class="check-label">
             <input v-model="documentIds" type="checkbox" :value="doc.id"
               :disabled="busy || !available(doc) || (!documentIds.includes(doc.id) && chosen.length >= 10)" />
-            <span>{{ doc.name }} <small v-if="!available(doc)">· 尚不可用或已过期</small></span>
+            <span>{{ doc.name }} <small>· {{ documentStatus(doc) }}</small></span>
           </label>
         </fieldset>
-        <button class="btn primary" :disabled="busy || !chosen.length || goal.trim().length < 10">{{ busy ? '正在提交…' : '生成能力草稿' }}</button>
+        <button class="btn primary" :disabled="busy || !chosen.length || goal.trim().length < 10 || (generalEnabled && !modelReady)">{{ busy ? '正在提交…' : '生成能力草稿' }}</button>
       </form>
     </section>
 
@@ -434,7 +487,7 @@ onMounted(() => { void action(list) })
           </details>
         </div>
         <h1 class="learning-goal">{{ workspace.goal_text }}</h1>
-        <div v-if="!['draft', 'generating', 'failed'].includes(workspace.status)" class="learning-tabs" aria-label="专题内容">
+        <div v-if="!['draft', 'generating', 'preparing', 'failed'].includes(workspace.status)" class="learning-tabs" aria-label="专题内容">
           <button :aria-pressed="tab === 'task'" @click="tab = 'task'">{{ feedback ? '本次反馈' : '当前任务' }}</button>
           <button :aria-pressed="tab === 'history'" @click="tab = 'history'; hint = undefined">学习记录</button>
         </div>
@@ -449,34 +502,51 @@ onMounted(() => { void action(list) })
         <button v-if="planJob?.status === 'failed'" class="btn primary" :disabled="busy" @click="retry(planJob.id)">重试生成草稿</button>
       </section>
 
+      <section v-else-if="workspace.status === 'preparing'" class="panel learning-panel" aria-live="polite">
+        <h2>正在准备练习</h2>
+        <p>{{ practiceJob?.stage || '正在复核原文并核验题目。' }}</p>
+      </section>
+
       <section v-else-if="workspace.status === 'draft'" class="learning-plan">
+        <div v-if="practiceJob?.status === 'failed' && practiceJob.input_version === workspace.state_version"
+          class="alert error-alert" role="alert">
+          <p>{{ practiceJob.error || '练习未能生成，草稿已保留。' }}</p>
+          <div class="inline-actions">
+            <button v-if="practiceJob.failed_capability_id" class="text-button" @click="focusCapability(practiceJob.failed_capability_id)">查看失败能力</button>
+            <button v-if="canRetryPractice" class="text-button" :disabled="busy" @click="retry(practiceJob.id)">重试准备练习</button>
+          </div>
+        </div>
         <div class="plan-progress">
           <p role="status"><strong>已核对 {{ reviewedCount }} / {{ covered.length }} 项</strong></p>
-          <button v-if="!canConfirm" class="text-button" @click="focusUnchecked">查看待核对项</button>
+          <button v-if="!canConfirm" class="text-button" @click="focusCapability()">查看待核对项</button>
         </div>
         <article v-for="cap in workspace.capabilities" :id="'cap-' + cap.id" :key="cap.id" class="panel learning-panel capability-card" tabindex="-1">
           <div class="section-heading capability-heading">
             <h3>{{ cap.title }}</h3>
-            <span class="status-badge" :class="{ ready: cap.coverage_status === 'covered', pending: cap.coverage_status === 'partial' }">{{ { covered: '资料已覆盖', partial: '部分覆盖', missing: '缺少依据' }[cap.coverage_status] || cap.coverage_status }}</span>
+            <span class="status-badge" :class="{ ready: cap.coverage_status === 'covered', pending: ['partial', 'pending_review'].includes(cap.coverage_status) }">{{ coverageLabels[cap.coverage_status] || cap.coverage_status }}</span>
           </div>
           <p class="capability-outcome">{{ cap.observable_outcome }}</p>
+          <p v-if="cap.coverage_details?.gap" class="muted">{{ cap.coverage_details.gap }}</p>
           <details class="bound-sources">
             <summary>查看原文依据</summary>
             <p v-if="!cap.source_ids.length">尚未绑定依据，请从编辑入口选择原文。</p>
             <article v-for="id in cap.source_ids" :key="id" class="source-card">
               <strong>{{ sourceName(id) }}</strong>
               <p>{{ name(workspace.sources.find(source => source.id === id)?.state || 'unavailable') }}</p>
+              <p v-for="evidence in cap.coverage_details?.evidence.filter(item => item.source_id === id)" :key="evidence.quote">
+                <strong>核验原句</strong> {{ evidence.quote }}
+              </p>
               <blockquote>{{ workspace.sources.find(source => source.id === id)?.excerpt }}</blockquote>
             </article>
           </details>
-          <details class="capability-edit" @change="reviewed.delete(cap.id)">
+          <details class="capability-edit" @change="editCapability(cap)">
             <summary>编辑目标与依据</summary>
             <div class="action-stack">
-              <label>能力名称<input v-model="cap.title" maxlength="200" :disabled="busy" @input="reviewed.delete(cap.id)" /></label>
-              <label>可验证的产出<textarea v-model="cap.observable_outcome" rows="2" maxlength="2000" :disabled="busy" @input="reviewed.delete(cap.id)" /></label>
+              <label>能力名称<input v-model="cap.title" maxlength="200" :disabled="busy" @input="editCapability(cap)" /></label>
+              <label>可验证的产出<textarea v-model="cap.observable_outcome" rows="2" maxlength="2000" :disabled="busy" @input="editCapability(cap)" /></label>
               <label>资料覆盖
-                <select v-model="cap.coverage_status" :disabled="busy">
-                  <option value="covered">资料已覆盖</option><option value="partial">部分覆盖</option><option value="missing">缺少依据</option>
+                <select v-model="cap.coverage_status" :disabled="busy" @change.stop="editCapability(cap, cap.coverage_status === 'covered')">
+                  <option v-if="generalPlan" value="pending_review">待复核</option><option value="covered">资料已覆盖</option><option value="partial">部分覆盖</option><option value="missing">缺少依据</option>
                 </select>
               </label>
               <fieldset>
@@ -494,7 +564,7 @@ onMounted(() => { void action(list) })
               </fieldset>
             </div>
           </details>
-          <label v-if="cap.coverage_status === 'covered'" class="check-label">
+          <label v-if="eligible(cap)" class="check-label">
             <input v-model="reviewed" type="checkbox" :value="cap.id" :disabled="busy" />已核对此项能力及其原文依据
           </label>
         </article>

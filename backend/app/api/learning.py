@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
@@ -19,18 +19,21 @@ from app.models import (
     LearningSourceSnapshot,
     LearningTask,
     LearningWorkspace,
+    User,
     utcnow,
 )
 from app.schemas_learning import (
     AttemptRequest,
+    ConfirmRequest,
     CorrectionRequest,
     HintRequest,
     LearningCreate,
     NextRequest,
     PlanEdit,
-    VersionRequest,
 )
+from app.services.answering import llm_ready
 from app.services.corpus import CorpusScope
+from app.services.learning import general
 from app.services.learning.planning import templates
 from app.services.learning.progression import choose_next, recompute
 from app.services.learning.sources import check_sources, source_state
@@ -84,10 +87,15 @@ def not_busy(db, workspace):
 
 
 def job_payload(job):
-    return {
+    payload = {
         key: getattr(job, key)
         for key in ["id", "workspace_id", "kind", "target_id", "status", "stage", "error", "result_ref", "created_at"]
     }
+    if job.kind == general.JOB_KIND:
+        payload["capability_ids"] = (job.input_payload or {}).get("capability_ids", [])
+        payload["input_version"] = job.input_version
+        payload["failed_capability_id"] = job.result_ref if job.status == "failed" else None
+    return payload
 
 
 def attempt_payload(db, workspace, row):
@@ -118,7 +126,19 @@ def detail(db, workspace, retries=0):
     sources = db.scalars(
         select(LearningSourceSnapshot).where(LearningSourceSnapshot.workspace_id == workspace.id)
     ).all()
-    restricted = any(source_state(db, workspace.user_id, s) == "unavailable" for s in sources)
+    source_states = {s.id: source_state(db, workspace.user_id, s) for s in sources}
+    restricted = "unavailable" in source_states.values()
+    warning = ""
+    if restricted:
+        warning = "部分来源已删除，相关内容已隐藏"
+    elif "expired" in source_states.values():
+        warning = "包含过期来源，请补充资料后新建专题"
+    elif workspace.plan_version == general.GENERAL_PLAN and workspace.status in {"draft", "preparing"}:
+        user = db.get(User, workspace.user_id)
+        try:
+            general.scoped_documents(db, user, workspace, require_same=True)
+        except HTTPException as exc:
+            warning = exc.detail
     caps = db.scalars(
         select(LearningCapability)
         .where(LearningCapability.workspace_id == workspace.id)
@@ -140,11 +160,7 @@ def detail(db, workspace, retries=0):
                 "updated_at",
             ]
         },
-        "source_warning": "部分来源已删除，相关内容已隐藏"
-        if restricted
-        else "包含过期来源，请补充资料后新建专题"
-        if any(source_state(db, workspace.user_id, s) == "expired" for s in sources)
-        else "",
+        "source_warning": warning,
         "capabilities": [
             {
                 **{
@@ -162,6 +178,8 @@ def detail(db, workspace, retries=0):
                     ]
                 },
                 **({"title": "来源不可用", "observable_outcome": ""} if restricted else {}),
+                **({"coverage_details": None if restricted else c.coverage_details}
+                   if workspace.plan_version == general.GENERAL_PLAN else {}),
             }
             for c in caps
         ],
@@ -169,10 +187,11 @@ def detail(db, workspace, retries=0):
             {
                 "id": s.id,
                 "document_name": s.document_name if not restricted else "来源不可用",
+                "document_id": s.document_id,
                 "page": s.page,
                 "revision_id": s.revision_id,
-                "state": source_state(db, workspace.user_id, s),
-                "excerpt": s.excerpt if workspace.status == "draft" and not restricted else "",
+                "state": source_states[s.id],
+                "excerpt": s.excerpt if workspace.status in {"draft", "preparing"} and not restricted else "",
             }
             for s in sources
         ],
@@ -183,7 +202,7 @@ def detail(db, workspace, retries=0):
             )
         ],
         "jobs": [
-            job_payload(j)
+            {**job_payload(j), **({"error": None} if restricted else {})}
             for j in db.scalars(
                 select(LearningJob)
                 .where(LearningJob.workspace_id == workspace.id)
@@ -222,22 +241,32 @@ def create(body: LearningCreate, db: DB, user: CurrentUser, request: Request):
         return {"workspace_id": existing.workspace_id, "job": job_payload(existing)}
     if len(set(body.document_ids)) != len(body.document_ids):
         raise HTTPException(422, "资料列表包含重复文档")
-    if not any(word in body.goal_text.lower() for word in ["事务", "transaction"]):
+    settings = request.app.state.settings
+    use_general = settings.learning_general_enabled
+    if not use_general and not any(word in body.goal_text.lower() for word in ["事务", "transaction"]):
         raise HTTPException(422, "这一版仅支持数据库事务专题，请在目标中明确事务学习目标")
-    CorpusScope(db, user, [body.knowledge_base_id], body.document_ids)
+    if use_general and len(body.goal_text.strip()) < 10:
+        raise HTTPException(422, "请填写至少10字的具体学习目标")
     count = db.scalar(
         select(func.count())
         .select_from(LearningJob)
         .where(LearningJob.user_id == user.id, LearningJob.status.in_(["queued", "running"]))
     )
-    if count >= request.app.state.settings.max_pending_jobs:
+    if count >= settings.max_pending_jobs:
         raise HTTPException(429, "待处理的学习任务过多，请稍后再试")
     workspace = LearningWorkspace(
         user_id=user.id,
         knowledge_base_id=body.knowledge_base_id,
         selected_document_ids=body.document_ids,
         goal_text=body.goal_text,
+        plan_version=general.GENERAL_PLAN if use_general else 1,
     )
+    if use_general:
+        _, workspace.source_fingerprint = general.scoped_documents(db, user, workspace)
+        if not llm_ready():
+            raise HTTPException(503, "通用专题需要配置生成模型，当前学习目标与资料可保留后重试")
+    else:
+        CorpusScope(db, user, [body.knowledge_base_id], body.document_ids)
     db.add(workspace)
     db.flush()
     job = LearningJob(
@@ -253,6 +282,9 @@ def create(body: LearningCreate, db: DB, user: CurrentUser, request: Request):
         db.commit()
     except IntegrityError:
         db.rollback()
+        existing = db.scalar(select(LearningJob).where(LearningJob.user_id == user.id, LearningJob.request_key == body.request_key))
+        if existing and existing.body_hash == value_hash and existing.kind == "plan":
+            return {"workspace_id": existing.workspace_id, "job": job_payload(existing)}
         raise HTTPException(409, "相同请求正在登记，请使用原请求标识重试") from None
     return {"workspace_id": workspace.id, "job": job_payload(job)}
 
@@ -260,7 +292,7 @@ def create(body: LearningCreate, db: DB, user: CurrentUser, request: Request):
 @router.get("/workspaces")
 def listing(db: DB, user: CurrentUser, offset: int = 0, limit: int = 30):
     return [
-        {key: getattr(w, key) for key in ["id", "goal_text", "status", "updated_at", "current_task_id"]}
+        {key: getattr(w, key) for key in ["id", "goal_text", "status", "updated_at", "current_task_id", "plan_version"]}
         for w in db.scalars(
             select(LearningWorkspace)
             .where(LearningWorkspace.user_id == user.id)
@@ -283,32 +315,88 @@ def edit(wid: str, body: PlanEdit, db: DB, user: CurrentUser):
     if workspace.status != "draft":
         raise HTTPException(409, "确认后的能力已冻结；请新建专题草稿修改目标")
     caps = {c.id: c for c in db.scalars(select(LearningCapability).where(LearningCapability.workspace_id == wid))}
-    if set(caps) != {c.id for c in body.capabilities} or len({c.id for c in body.capabilities}) != 3:
-        raise HTTPException(422, "必须保留当前专题的三个能力")
+    if set(caps) != {c.id for c in body.capabilities} or len(caps) != len(body.capabilities):
+        raise HTTPException(422, "必须保留当前草稿的实际能力，且每项只能提交一次")
+    use_general = workspace.plan_version == general.GENERAL_PLAN
+    if use_general:
+        general.scoped_documents(db, user, workspace, require_same=True)
     edges = {c.id: c.prerequisite_ids for c in body.capabilities}
-
-    def walk(cid, ancestors):
-        if cid in ancestors or cid not in caps:
-            raise HTTPException(422, "先修关系包含环或其他专题的能力")
-        for parent in edges[cid]:
-            walk(parent, ancestors | {cid})
+    try:
+        general.validate_prerequisites(edges)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     for item in body.capabilities:
-        walk(item.id, set())
         if item.source_ids:
-            check_sources(db, workspace, item.source_ids)
+            check_sources(db, workspace, item.source_ids, require_current=use_general)
         if item.coverage_status == "covered" and not item.source_ids:
             raise HTTPException(422, "资料已覆盖的能力必须绑定原文依据")
-        for key, value in item.model_dump(exclude={"id"}).items():
-            setattr(caps[item.id], key, value)
+        if not use_general and item.coverage_status == "pending_review":
+            raise HTTPException(422, "旧版事务专题不支持待复核状态")
+        cap = caps[item.id]
+        fields = item.model_dump(exclude={"id"})
+        changed = any(fields[key] != getattr(cap, key) for key in ("title", "observable_outcome", "source_ids", "prerequisite_ids"))
+        if use_general and (changed or item.coverage_status != cap.coverage_status):
+            if not item.source_ids:
+                fields["coverage_status"] = "missing"
+            elif changed or item.coverage_status in {"covered", "pending_review"}:
+                fields["coverage_status"] = "pending_review"
+            cap.coverage_details = {
+                "gap": "目标或依据已变更，准备练习前需要复核" if item.source_ids else general.MISSING_EVIDENCE,
+                "evidence": [],
+            }
+        for key, value in fields.items():
+            setattr(cap, key, value)
     workspace.state_version += 1
     db.commit()
     return detail(db, workspace)
 
 
+def confirm_general(db, user, workspace, body, settings):
+    if not body.capability_ids or not body.request_key or len(set(body.capability_ids)) != len(body.capability_ids):
+        raise HTTPException(422, "请提交已核对能力及请求标识")
+    # Acquire the workspace lock before replay lookup so overlapping confirms see the same job.
+    lock(db, workspace)
+    value_hash = digest([workspace.id, body.state_version, sorted(body.capability_ids)])
+    existing = db.scalar(select(LearningJob).where(LearningJob.user_id == user.id, LearningJob.request_key == body.request_key))
+    if existing:
+        if existing.kind != general.JOB_KIND or existing.body_hash != value_hash:
+            raise HTTPException(409, "同一请求标识不能用于不同内容")
+        return {**detail(db, workspace), "job": job_payload(existing)}
+    if workspace.state_version != body.state_version or workspace.status != "draft":
+        raise HTTPException(409, "学习状态已更新，请刷新后重试")
+    if not llm_ready():
+        raise HTTPException(503, "请配置生成模型后再准备练习，草稿已保留")
+    not_busy(db, workspace)
+    general.scoped_documents(db, user, workspace, require_same=True)
+    general.checked_capabilities(db, workspace, body.capability_ids)
+    count = db.scalar(select(func.count()).select_from(LearningJob).where(
+        LearningJob.user_id == user.id, LearningJob.status.in_(["queued", "running"])
+    ))
+    if count >= settings.max_pending_jobs:
+        raise HTTPException(429, "待处理的学习任务过多，请稍后再试")
+    workspace.status = "preparing"
+    workspace.state_version += 1
+    job = LearningJob(
+        workspace_id=workspace.id, user_id=user.id, request_key=body.request_key,
+        body_hash=value_hash, kind=general.JOB_KIND, target_id=workspace.id,
+        input_version=workspace.state_version, input_payload={"capability_ids": body.capability_ids},
+    )
+    db.add(job)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(409, "请求标识已被其他操作使用") from None
+    return {**detail(db, workspace), "job": job_payload(job)}
+
+
 @router.post("/workspaces/{wid}/confirm")
-def confirm(wid: str, body: VersionRequest, db: DB, user: CurrentUser):
+def confirm(wid: str, body: ConfirmRequest, db: DB, user: CurrentUser, request: Request, response: Response):
     workspace = own(db, user, wid)
+    if workspace.plan_version == general.GENERAL_PLAN:
+        response.status_code = 202
+        return confirm_general(db, user, workspace, body, request.app.state.settings)
     lock(db, workspace, body.state_version)
     if workspace.status != "draft":
         raise HTTPException(409, "只有草稿可以确认")
@@ -357,6 +445,9 @@ def task_detail(tid: str, db: DB, user: CurrentUser):
         check_sources(db, workspace, task.source_ids, for_work=False)
     except HTTPException:
         restricted = True
+    rubric = task.rubric
+    if task.template_version == general.TASK_VERSION:
+        rubric = [{key: item[key] for key in ("id", "description", "source_ids")} for item in rubric]
     return {
         "id": task.id,
         "workspace_id": workspace.id,
@@ -365,7 +456,7 @@ def task_detail(tid: str, db: DB, user: CurrentUser):
         "status": task.status,
         "kind": task.kind,
         "prompt": task.prompt if not restricted else "来源不可用，题面已隐藏",
-        "rubric": task.rubric if not restricted else [],
+        "rubric": rubric if not restricted else [],
         "source_ids": task.source_ids,
         "restricted": restricted,
         "attempts": [
@@ -472,14 +563,21 @@ def attempt_detail(aid: str, db: DB, user: CurrentUser):
 
 @router.get("/jobs/{jid}")
 def job_detail(jid: str, db: DB, user: CurrentUser):
-    job, _ = resource(db, user, LearningJob, jid)
-    return job_payload(job)
+    job, workspace = resource(db, user, LearningJob, jid)
+    payload = job_payload(job)
+    if workspace.plan_version == general.GENERAL_PLAN and job.error:
+        if any(source_state(db, user.id, source) == "unavailable" for source in db.scalars(
+            select(LearningSourceSnapshot).where(LearningSourceSnapshot.workspace_id == workspace.id)
+        )):
+            payload["error"] = "来源已删除，相关内容已隐藏"
+    return payload
 
 
 @router.post("/jobs/{jid}/retry")
 def retry(jid: str, db: DB, user: CurrentUser):
     job, workspace = resource(db, user, LearningJob, jid)
     lock(db, workspace)
+    db.refresh(job)
     if job.status != "failed":
         return job_payload(job)
     not_busy(db, workspace)
@@ -499,10 +597,26 @@ def retry(jid: str, db: DB, user: CurrentUser):
         task = db.get(LearningTask, attempt.task_id)
         check_sources(db, workspace, task.source_ids)
         attempt.assessment_status = "queued"
-    else:
+    elif job.kind == general.JOB_KIND:
+        if workspace.status != "draft" or workspace.state_version != job.input_version:
+            raise HTTPException(409, "草稿已变更，请重新核对并确认能力")
+        if not llm_ready():
+            raise HTTPException(503, "请配置生成模型后再重试练习")
+        general.scoped_documents(db, user, workspace, require_same=True)
+        general.checked_capabilities(db, workspace, (job.input_payload or {}).get("capability_ids", []))
+        workspace.status = "preparing"
+    elif job.kind == "plan" and workspace.plan_version == general.GENERAL_PLAN:
+        if not llm_ready():
+            raise HTTPException(503, "请配置生成模型后再重试草稿")
+        _, workspace.source_fingerprint = general.scoped_documents(db, user, workspace)
+        workspace.status = "generating"
+    elif job.kind == "plan":
         CorpusScope(db, user, [workspace.knowledge_base_id], workspace.selected_document_ids)
         workspace.status = "generating"
+    else:
+        raise HTTPException(409, "未知学习作业类型")
     job.status, job.error, job.attempts = "queued", None, 0
+    job.stage, job.result_ref = "等待执行", None
     job.input_version, job.available_at = workspace.state_version, utcnow() + timedelta(milliseconds=100)
     db.commit()
     return job_payload(job)

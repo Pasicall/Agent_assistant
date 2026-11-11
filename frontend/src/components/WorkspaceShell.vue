@@ -132,7 +132,8 @@ onMounted(() => { void loadCapabilities(); void corpus.refresh() })
         :user="user" :entry="chatEntry" :enter-sends="preferences.enterSends" @upload="uploadIn" />
       <LearningWorkspace v-if="capabilities?.learning_enabled && visited.has('learning')" v-show="view === 'learning'"
         :active="view === 'learning'" :knowledge-bases="corpus.state.bases" :documents="corpus.state.documents"
-        :user-id="user.id" :model-ready="capabilities.learning_assessment_configured" @upload="uploadIn" />
+        :user-id="user.id" :model-ready="capabilities.learning_assessment_configured"
+        :general-enabled="capabilities.learning_general_enabled" @upload="uploadIn" />
       <EvaluationWorkspace v-if="capabilities?.evaluation_enabled && visited.has('evaluations')"
         v-show="view === 'evaluations'" :active="view === 'evaluations'" :corpus="corpus" />
     </div>

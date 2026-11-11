@@ -36,6 +36,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("RAG_ALLOW_REGISTRATION", "true")
     monkeypatch.setenv("RAG_WORKER_ROLE", "all")
     monkeypatch.setenv("RAG_EVALUATION_ENABLED", "true")
+    monkeypatch.setenv("RAG_LEARNING_GENERAL_ENABLED", "false")
     monkeypatch.setenv("RAG_BROWSER_SOURCE_SYNC_ENABLED", "false")
     monkeypatch.setenv("RAG_DIAGNOSTICS_TOKEN", "")
     get_settings.cache_clear()

@@ -499,10 +499,11 @@ def test_model_repairs_and_budgets_are_bounded(client, monkeypatch):
     register(client)
     with client.app.state.database.session() as db:
         uid = db.scalar(select(User.id))
+    local = client.app.state.settings.model_copy(update={"llm_provider": "ollama"})
     with pytest.raises(ValueError):
         invoke_json(
             client.app.state.database,
-            client.app.state.settings,
+            local,
             uid,
             "评价",
             {"answer": "答案", "sources": [{"id": "s", "text": "来源" * 3000}]},
@@ -515,7 +516,7 @@ def test_model_repairs_and_budgets_are_bounded(client, monkeypatch):
     payload = json.loads(calls[0][1].content)
     assert payload["answer"] == "答案" and payload["sources"][0]["id"] == "s"
     assert len(payload["sources"][0]["text"]) < 6000
-    settings = client.app.state.settings.model_copy(update={"user_daily_model_requests": 2})
+    settings = local.model_copy(update={"user_daily_model_requests": 2})
     from fastapi import HTTPException
 
     with pytest.raises(HTTPException) as exc:
@@ -524,6 +525,47 @@ def test_model_repairs_and_budgets_are_bounded(client, monkeypatch):
         )
     assert exc.value.status_code == 429
     assert len(calls) == 2
+
+
+def test_remote_learning_budget_keeps_answer_and_accounts_for_json_escaping(client, monkeypatch):
+    import json
+
+    from app.schemas_learning import GeneralAssessmentResult
+    from app.services.learning.model import invoke_json
+    from langchain_core.messages import AIMessage
+
+    calls = []
+
+    class Model:
+        def invoke(self, messages):
+            calls.append(messages)
+            return AIMessage(content=json.dumps({
+                "criteria": [{"criterion_id": "r1", "verdict": "insufficient_evidence", "student_quotes": [],
+                              "source_ids": ["s0"], "reason": "证据不足"}],
+                "feedback": "请补充计算过程", "reveals_solution": False,
+            }))
+
+    monkeypatch.setattr("app.services.learning.model.llm_ready", lambda: True)
+    monkeypatch.setattr("app.services.learning.model.configured_llm", lambda: Model())
+    register(client)
+    with client.app.state.database.session() as db:
+        uid = db.scalar(select(User.id))
+    settings = client.app.state.settings.model_copy(update={"llm_provider": "openai", "ollama_num_ctx": 4096})
+    answer = "推导过程" * 1800
+    text = ('汉字"\\\n' * 4000)
+    payload = {"answer": answer, "sources": [
+        {"id": f"s{i}", "document_name": "长文件名" * 30, "text": text} for i in range(12)
+    ]}
+    _, metadata = invoke_json(client.app.state.database, settings, uid, "评价", payload, GeneralAssessmentResult)
+    system, body = (message.content for message in calls[0])
+    sent = json.loads(body)
+    assert sent["answer"] == answer
+    assert settings.ollama_num_ctx < len(body.encode()) < settings.learning_remote_input_bytes
+    assert len(system.encode()) + len(body.encode()) + 1024 <= settings.learning_remote_input_bytes
+    assert [item["bytes"] for item in metadata["source_inputs"]] == [
+        len(source["text"].encode()) for source in sent["sources"]
+    ]
+    assert all(text.startswith(source["text"]) and source["text"] != text for source in sent["sources"])
 
 
 def test_interleaving_obstacle_prioritizes_timeline_instead_of_order_count(client, monkeypatch):

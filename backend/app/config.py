@@ -55,8 +55,10 @@ class Settings(BaseSettings):
     global_active_chats: int = Field(default=4, ge=1, le=128)
     worker_role: str = "all"
     learning_enabled: bool = True
+    learning_general_enabled: bool = False
     evaluation_enabled: bool = False
     learning_model_repairs: int = Field(default=1, ge=0, le=1)
+    learning_remote_input_bytes: int = Field(default=65536, ge=4096, le=262144)
     user_daily_model_requests: int = Field(default=500, ge=1)
     worker_max_attempts: int = Field(default=3, ge=1, le=10)
     metrics_token: str = ""

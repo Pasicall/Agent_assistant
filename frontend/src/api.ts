@@ -10,7 +10,7 @@ export type Conversation = { id: string; title: string; created_at: string }
 export type EvaluationCase = { question: string; reference: string; expected_document_ids?: string[]; message_id?: string }
 export type Evaluation = { id: string; name: string; status: string; metrics: Record<string, unknown>; results: Record<string, unknown>[]; created_at: string; error?: string }
 export type Comparison = { dense: Record<string, unknown>; hybrid: Record<string, unknown>; relative_hit_rate_change: number | null }
-export type Capabilities = { max_upload_mb: number; learning_enabled: boolean; learning_assessment_configured: boolean; evaluation_enabled: boolean; folder_sync_available: boolean }
+export type Capabilities = { max_upload_mb: number; learning_enabled: boolean; learning_general_enabled?: boolean; learning_assessment_configured: boolean; evaluation_enabled: boolean; folder_sync_available: boolean }
 export type AnswerMetadata = { provider?: string; verification?: { mode: string; passed: boolean }; abstained?: boolean }
 export type ChatResponse = { answer: string; citations: Citation[]; trace: Trace[]; cached: boolean; conversation_id: string; message_id: string; provider: string; usage: Record<string, unknown>; verification?: { mode: string; passed: boolean; semantic_checked?: boolean }; abstained?: boolean }
 
