@@ -8,11 +8,13 @@ from datetime import timedelta
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import update
 
 from app import __version__
 from app.api.routes import router
 from app.config import get_settings
 from app.db import Database
+from app.models import EvaluationRun, utcnow
 from app.worker import run_worker
 
 logger = logging.getLogger(__name__)
@@ -64,13 +66,11 @@ def create_app(settings=None):
         app.state.database = database
         database.initialize()
         # Recover legacy synchronous runs; new queued evaluations carry a lease.
-        from sqlalchemy import update
-
-        from app.models import EvaluationRun, utcnow
+        
         with database.session() as db:
             db.execute(update(EvaluationRun).where(EvaluationRun.status == "running",
-                       EvaluationRun.lease_token.is_(None),
-                       EvaluationRun.created_at < utcnow() - timedelta(hours=2)).values(
+                    EvaluationRun.lease_token.is_(None),
+                    EvaluationRun.created_at < utcnow() - timedelta(hours=2)).values(
                 status="failed", error="服务重启中断了评测，请重新运行"))
             db.commit()
         stop = threading.Event()
@@ -78,7 +78,7 @@ def create_app(settings=None):
         worker = None
         if not settings.redis_url:
             worker = threading.Thread(target=run_worker, args=(database, settings, stop), daemon=True,
-                                      name="rag-ingestion-worker")
+                                    name="rag-ingestion-worker")
             worker.start()
         app.state.worker_thread = worker
         try:
@@ -91,8 +91,8 @@ def create_app(settings=None):
 
     app = FastAPI(title="知衡 · RAG Knowledge Assistant", version=__version__, lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=settings.cors_origins,
-                       allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
-                       allow_headers=["Authorization", "Content-Type", "X-RAG-Request"])
+                    allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "PUT", "PATCH", "OPTIONS"],
+                    allow_headers=["Authorization", "Content-Type", "X-RAG-Request"])
     app.add_middleware(UploadLimitMiddleware, settings=settings)
 
     @app.middleware("http")

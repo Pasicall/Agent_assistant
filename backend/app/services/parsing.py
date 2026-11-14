@@ -9,6 +9,8 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
 from app.config import get_settings
 
 SUPPORTED_EXTENSIONS = {".txt", ".md", ".csv", ".json", ".html", ".htm", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp"}
@@ -80,6 +82,7 @@ def parse_document(path: Path, filename: str, progress=None) -> list[ParsedPage]
             rendered = pypdfium2.PdfDocument(path)
         except pypdfium2.PdfiumError as exc:
             raise ValueError("PDF 无法打开，可能已加密或文件损坏") from exc
+        
         try:
             total, pages = len(rendered), []
             if total > 2000:
@@ -137,9 +140,11 @@ def parse_document(path: Path, filename: str, progress=None) -> list[ParsedPage]
     if ext in {".png", ".jpg", ".jpeg", ".webp"}:
         return [ParsedPage(_image_text(path.read_bytes()))]
     text = _decode(path.read_bytes())
+
     if ext == ".md":
         from app.services.evidence import clean_text
         text = clean_text(text)
+
     if ext in {".html", ".htm"}:
         from bs4 import BeautifulSoup
 
@@ -147,22 +152,32 @@ def parse_document(path: Path, filename: str, progress=None) -> list[ParsedPage]
         for element in soup(["script", "style", "noscript"]):
             element.decompose()
         text = soup.get_text("\n", strip=True)
+
     if ext == ".json":
         text = json.dumps(json.loads(text), ensure_ascii=False, indent=2)
     return [ParsedPage(text)]
 
 
 def chunk_pages(pages: list[ParsedPage]) -> list[dict]:
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
+    """
+    chunk_size:每块的长度，默认800字符
+    chunk_overleaf: 相邻块之间的重叠长度，长度为120字符
+    separators: 按优先级尝试的切分边界
+    """
 
     s = get_settings()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=s.chunk_size, chunk_overlap=s.chunk_overlap,
-        separators=["\n\n", "\n", "。", "！", "？", ". ", " ", ""], length_function=len)
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=s.chunk_size, 
+        chunk_overlap=s.chunk_overlap,
+        separators=["\n\n", "\n", "。", "！", "？", ". ", " ", ""],
+        length_function=len)
+    
     chunks = []
     for page in pages:
         for text in splitter.split_text(page.text.replace("\x00", "").strip()):
             if text.strip():
                 chunks.append({"text": text, "page": page.page, "ordinal": len(chunks)})
+
     if not chunks:
         raise ValueError("文档没有可检索文本；扫描件请开启 OCR/视觉模型")
     return chunks

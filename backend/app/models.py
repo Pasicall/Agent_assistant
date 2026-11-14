@@ -39,6 +39,9 @@ class User(Base):
 
 
 class KnowledgeBase(Base):
+    """
+    一组个人资料及变更代次
+    """
     __tablename__ = "knowledge_bases"
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
@@ -53,6 +56,9 @@ class KnowledgeBase(Base):
 
 
 class Document(Base):
+    """
+    文档可用状态
+    """
     __tablename__ = "documents"
     __table_args__ = (UniqueConstraint("knowledge_base_id", "sha256", name="uq_document_kb_sha"),)
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)

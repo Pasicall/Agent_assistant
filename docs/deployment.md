@@ -258,7 +258,17 @@ docker compose --env-file .env.docker logs --tail=100 api worker
 curl http://127.0.0.1:8010/api/health
 ```
 
-健康检查用于确认 API 进程可响应；模型和解析能力应结合“系统与模型”页面及实际任务检查。
+`/api/health` 检查 API 进程，`/api/ready` 检查数据库、队列等运行依赖。登录后的 `/api/capabilities` 提供上传上限和功能开关等界面配置。
+
+需要排查模型时，在服务端设置独立的 `RAG_DIAGNOSTICS_TOKEN`。旧 `/api/system` 保留配置响应结构，`/api/ready/models` 检查连通性与模型列表。两者都使用同一个运维 Bearer 凭据，留空时关闭。指标仍使用单独的 `RAG_METRICS_TOKEN`。
+
+```bash
+curl -fsS http://127.0.0.1:8010/api/ready
+curl -fsS -H "Authorization: Bearer ${RAG_DIAGNOSTICS_TOKEN}" http://127.0.0.1:8010/api/system
+curl -fsS -H "Authorization: Bearer ${RAG_DIAGNOSTICS_TOKEN}" http://127.0.0.1:8010/api/ready/models
+```
+
+接入真实模型的 `scripts/smoke.py` 需要 API 和脚本使用同一个 `RAG_DIAGNOSTICS_TOKEN`，并在 API 和 Worker 配置 `RAG_EVALUATION_ENABLED=true`。隔离的 Compose 评测验收同样需要在其环境文件启用评测。
 
 | 现象 | 检查方向 |
 | --- | --- |
@@ -340,9 +350,14 @@ docker compose --env-file .env.docker -f docker-compose.yml -f docker-compose.mo
 
 修改 `.env` 或部署配置后重启 API 与 Worker。没有在线动态配额或管理员任务入口；原有自己的文档重试、后台恢复和清理仍可用。
 
-设置 `RAG_SOURCE_SYNC_ROOT=/absolute/path/to/materials` 后，知识空间显示可折叠的“同步文档源”。选择个人知识库和根目录内相对路径执行增量导入，每次最多 100 份支持的文件；越界路径和符号链接会被拒绝。源文件移除时保留版本，需显式过期或删除。容器部署在共用环境中透传该设置，并将根目录只读挂载给 API，例如 `./materials:/materials:ro` 和 `RAG_SOURCE_SYNC_ROOT=/materials`。
+### 可选开发工具
+
+- `RAG_EVALUATION_ENABLED=false` 默认关闭。仅在受信部署显式设为 `true`，重启 API 与 Worker 后可从「账号 → 开发工具」运行、对比或回看评测。关闭期间保留原有评测记录，专题评价独立运行。
+- `RAG_BROWSER_SOURCE_SYNC_ENABLED=false` 默认关闭。只有信任该实例的全部登录账号访问同一挂载目录时，才与 `RAG_SOURCE_SYNC_ROOT=/absolute/path/to/materials` 一起配置。入口为「资料库 → 知识库更多操作 → 从目录同步」。每次增量导入最多 100 份资料，服务器继续校验路径边界。Compose 部署可为 API 服务加只读挂载，例如 `./materials:/materials:ro`，并将根目录设置为 `/materials`。
 
 ### 从旧版升级
+
+配对发布前端和能力接口。回退前端时应保留服务端的默认关闭开关与运维访问限制。此次前端改版无需新增数据库迁移。
 
 升级前停稳全部 API/Worker，按前述步骤保存数据库、原文件与向量的协调备份并验证。个人库、文档、版本、分块和会话 ID 保持，未改变模型及分块配置时无需全量重新索引。专题学习 v0.2.0 的 Alembic head 为 `007_learning`，不要通过重建数据库或 `create_all()` 升级。
 

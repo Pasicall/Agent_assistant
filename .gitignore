@@ -30,3 +30,11 @@ AGENT.md
 personal-learning-assistant-plan.md
 # Project-local Conda installation; environment.yml remains versioned.
 .conda-env/
+
+update/
+.agents/
+start.sh
+
+
+owner@example.com
+correct horse 47

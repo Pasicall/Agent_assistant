@@ -32,7 +32,7 @@ def _b64(data: bytes) -> str:
 
 def issue_token(user_id: str, settings: Settings, session_id: str | None = None) -> str:
     payload = _b64(json.dumps({"sub": user_id, "exp": int(time.time()) + settings.token_lifetime_seconds,
-                               "nonce": session_id or secrets.token_hex(8)}, separators=(",", ":")).encode())
+                            "nonce": session_id or secrets.token_hex(8)}, separators=(",", ":")).encode())
     signature = _b64(hmac.new(settings.secret_key.encode(), payload.encode(), hashlib.sha256).digest())
     return f"{payload}.{signature}"
 
