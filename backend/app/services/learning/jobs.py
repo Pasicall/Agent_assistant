@@ -145,7 +145,9 @@ def process_learning(database, settings, job_id):
             elif job.kind == general.JOB_KIND:
                 general.checked_capabilities(db, workspace, capability_ids)
                 general.publish_practice(db, workspace, result)
-                choose_next(db, workspace)
+                # Each batch needs its own decision key; the confirm decision already owns "auto:confirm".
+                replenish = (job.input_payload or {}).get("replenish")
+                choose_next(db, workspace, request_key=f"replenish:{job.id}" if replenish else None)
             else:
                 attempt = db.get(LearningAttempt, job.target_id)
                 task = db.get(LearningTask, attempt.task_id)
@@ -200,7 +202,8 @@ def process_learning(database, settings, job_id):
                     workspace = db.get(LearningWorkspace, job.workspace_id)
                     if workspace and workspace.state_version == job.input_version:
                         if job.kind == general.JOB_KIND:
-                            workspace.status = "preparing" if retry else "draft"
+                            fallback = "needs_practice" if (job.input_payload or {}).get("replenish") else "draft"
+                            workspace.status = "preparing" if retry else fallback
                         else:
                             workspace.status = "generating" if retry else "failed"
                 db.commit()

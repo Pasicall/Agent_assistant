@@ -22,6 +22,7 @@ from app.services.retrieval import retrieve
 GENERAL_PLAN = 2
 TASK_VERSION = "grounded-v2"
 JOB_KIND = "practice"
+MAX_PRACTICE_BATCHES = 3
 MISSING_EVIDENCE = "在所选资料中暂未找到足够依据，请补充对应资料或缩小目标。"
 Family = Literal["foundation", "application", "transfer"]
 
@@ -351,6 +352,27 @@ def checked_exercises(database, settings, user_id, outcome, sources):
     return sorted(approved, key=lambda item: item[1]["family"] != "foundation")
 
 
+def replenish_capabilities(db, workspace):
+    """Capabilities that still need evidence and have no pending exercise to answer."""
+    caps = db.scalars(
+        select(LearningCapability)
+        .where(LearningCapability.workspace_id == workspace.id)
+        .order_by(LearningCapability.ordinal)
+    ).all()
+    pending = set(db.scalars(
+        select(LearningTask.capability_id).where(
+            LearningTask.workspace_id == workspace.id, LearningTask.status == "pending"
+        )
+    ))
+    targets = [
+        cap.id for cap in caps
+        if cap.coverage_status == "covered" and cap.state != "transfer_verified" and cap.id not in pending
+    ]
+    if not targets:
+        raise HTTPException(409, "当前没有需要补充练习的能力：请先完成待做练习，或让能力通过独立变式验证")
+    return targets
+
+
 def generate_practice(database, settings, user_id, selected):
     verified_capabilities = []
     for cap, sources in selected:
@@ -376,7 +398,9 @@ def generate_practice(database, settings, user_id, selected):
 
 
 def publish_practice(db, workspace, results):
-    ordinal = 0
+    # New batches continue the workspace sequence so ordinals stay unique across replenishment.
+    highest = db.scalar(select(func.max(LearningTask.ordinal)).where(LearningTask.workspace_id == workspace.id))
+    ordinal = (highest + 1) if highest is not None else 0
     for capability_id, verified, exercises in results:
         cap = db.get(LearningCapability, capability_id)
         cap.coverage_status = "covered"

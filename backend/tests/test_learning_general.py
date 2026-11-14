@@ -141,6 +141,101 @@ def confirm(client, headers, w, body=None):
     return client.post(f"/api/learning/workspaces/{w['id']}/confirm", headers=headers, json=body or confirm_body(w))
 
 
+def skip(client, headers, w):
+    reply = client.post(f"/api/learning/workspaces/{w['id']}/next", headers=headers, json={
+        "state_version": w["state_version"], "request_key": new_id(), "skip": True,
+    })
+    assert reply.status_code == 200, reply.text
+    return reply.json()
+
+
+def replenish(client, headers, w, key=None):
+    return client.post(f"/api/learning/workspaces/{w['id']}/practice", headers=headers, json={
+        "state_version": w["state_version"], "request_key": key or new_id(),
+    })
+
+
+def exhausted(client, headers, w):
+    for _ in range(len(w["tasks"])):
+        assert w["current_task_id"], w["status"]
+        w = skip(client, headers, w)
+    assert w["status"] == "needs_practice" and not w["current_task_id"], w["status"]
+    return w
+
+
+def test_practice_replenishment_adds_a_new_batch_with_unique_ordinals(client, model):
+    h = register(client)
+    kb = create_kb(client, h, "课程")
+    did = uploaded(client, h, kb, PHYSICS, "mechanics.txt")
+    w, _ = create_draft(client, h, kb, [did])
+    assert confirm(client, h, w).status_code == 202
+    w, job = wait_learning(client, h, w["id"], "practice")
+    assert job["status"] == "completed" and len(w["tasks"]) == 2
+
+    w = exhausted(client, h, w)
+    body = {"state_version": w["state_version"], "request_key": new_id()}
+    reply = replenish(client, h, w, body["request_key"])
+    assert reply.status_code == 202, reply.text
+    w, job = wait_learning(client, h, w["id"], "practice")
+    assert job["status"] == "completed", job
+    assert len(w["tasks"]) == 4 and w["status"] == "active" and w["current_task_id"]
+    with client.app.state.database.session() as db:
+        from sqlalchemy import select
+
+        ordinals = db.scalars(select(LearningTask.ordinal).where(LearningTask.workspace_id == w["id"])).all()
+    assert sorted(ordinals) == [0, 1, 2, 3]
+
+    replay = replenish(client, h, w, body["request_key"])
+    assert replay.status_code == 202 and replay.json()["job"]["id"] == job["id"]
+    blocked = replenish(client, h, w)
+    assert blocked.status_code == 409
+
+
+def test_failed_replenishment_keeps_progress_and_can_retry(client, model):
+    h = register(client)
+    kb = create_kb(client, h, "课程")
+    did = uploaded(client, h, kb, PHYSICS, "mechanics.txt")
+    w, _ = create_draft(client, h, kb, [did])
+    assert confirm(client, h, w).status_code == 202
+    w, _ = wait_learning(client, h, w["id"], "practice")
+    w = exhausted(client, h, w)
+
+    model.fail_exercise_for = PHYSICS_GOAL
+    reply = replenish(client, h, w)
+    assert reply.status_code == 202, reply.text
+    w, job = wait_learning(client, h, w["id"], "practice")
+    assert job["status"] == "failed"
+    assert w["status"] == "needs_practice" and len(w["tasks"]) == 2
+
+    model.fail_exercise_for = ""
+    assert client.post(f"/api/learning/jobs/{job['id']}/retry", headers=h).status_code == 200
+    w, job = wait_learning(client, h, w["id"], "practice")
+    assert job["status"] == "completed" and len(w["tasks"]) == 4
+
+
+def test_general_assessment_derives_obstacles_from_unmet_standards(client, model):
+    h = register(client)
+    kb = create_kb(client, h, "课程")
+    did = uploaded(client, h, kb, PHYSICS, "mechanics.txt")
+    w, _ = create_draft(client, h, kb, [did])
+    assert confirm(client, h, w).status_code == 202
+    w, job = wait_learning(client, h, w["id"], "practice")
+    assert job["status"] == "completed"
+
+    model.verdict = "partial"
+    w, job, submitted = submit(client, h, w)
+    assert job["status"] == "completed", job
+    attempt = client.get(f"/api/learning/attempts/{submitted['id']}", headers=h).json()
+    candidates = attempt["assessment"]["obstacle_candidates"]
+    assert [item["code"] for item in candidates] == ["apply_principle"]
+    assert candidates[0]["label"] == "说明原理如何支持结论"
+    assert candidates[0]["criterion_ids"] == ["r1"]
+    assert w["obstacles"] and w["obstacles"][0]["obstacle_code"] == "apply_principle"
+    assert w["obstacles"][0]["status"] == "suspected"
+    history = client.get(f"/api/learning/workspaces/{w['id']}/history", headers=h).json()
+    assert "当前线索" in history["decisions"][0]["reason"]
+
+
 @pytest.mark.parametrize(("goal", "material", "filename"), [
     (PHYSICS_GOAL, PHYSICS, "mechanics.pdf"),
     ("比较两份历史记载中的材料立场与时代背景", "记载甲：记录者主张增税。记载乙：地方商人描述了市场萧条。", "history.md"),

@@ -45,6 +45,29 @@ def validate_assessment(result, task, attempt):
     return result
 
 
+def general_obstacles(task, result):
+    """Derive candidate obstacles from unmet standards instead of trusting the model's self-report.
+
+    The code is the rubric focus the answer failed, so an obstacle can only describe a standard
+    that was actually judged and quoted; repeated families are still required before confirming.
+    """
+    rubric = {item["id"]: item for item in task.rubric}
+    merged = {}
+    for criterion in result["criteria"]:
+        standard = rubric.get(criterion["criterion_id"], {})
+        focus = standard.get("focus")
+        if not focus or criterion["verdict"] not in {"not_met", "partial"} or not criterion["student_evidence"]:
+            continue
+        entry = merged.setdefault(focus, {
+            "code": focus,
+            "label": standard.get("description", focus),
+            "criterion_ids": [],
+            "alternative_explanation": "这次作答在该标准上给出了可定位的说法，但仍需另一类题目独立确认。",
+        })
+        entry["criterion_ids"].append(criterion["criterion_id"])
+    return list(merged.values())[:4]
+
+
 def assess(database, settings, user_id, task, attempt, sources):
     general = task.template_version == TASK_VERSION
     rubric = task.rubric
@@ -74,6 +97,8 @@ def assess(database, settings, user_id, task, attempt, sources):
         GeneralAssessmentResult if general else AssessmentResult,
     )
     result = validate_assessment(result, task, attempt)
-    if general and task.hints[3] in result["feedback"]:
-        result["reveals_solution"] = True
+    if general:
+        if task.hints[3] in result["feedback"]:
+            result["reveals_solution"] = True
+        result["obstacle_candidates"] = general_obstacles(task, result)
     return {**result, "metadata": metadata}

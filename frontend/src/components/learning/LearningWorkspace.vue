@@ -47,6 +47,7 @@ let confirmation: RequestKey | undefined
 const savedDraft = ref('')
 let submission: RequestKey | undefined
 let advancement: RequestKey | undefined
+let practiceRequest: RequestKey | undefined
 let helpRequest: RequestKey | undefined
 function requestFor(signature: string, previous?: RequestKey) {
   return previous?.signature === signature ? previous : { signature, key: crypto.randomUUID() }
@@ -369,6 +370,18 @@ async function advance(skip: boolean) {
   await savedRefresh(w.id)
 }
 
+function replenish() {
+  return action(async () => {
+    const w = workspace.value
+    if (!w || !generalPlan.value || w.source_warning || w.current_task_id) return
+    practiceRequest = requestFor(JSON.stringify([w.id, w.state_version]), practiceRequest)
+    workspace.value = await learning.practice(w, practiceRequest.key)
+    practiceRequest = undefined
+    notice.value = '正在补充练习，完成后会自动刷新。'
+    await savedRefresh(w.id)
+  })
+}
+
 function retry(id: string) {
   return action(async () => {
     if (!workspace.value) return
@@ -644,9 +657,23 @@ onMounted(() => { void action(list) })
 
         <section v-else class="panel learning-panel">
           <h3>{{ workspace.status === 'completed' ? '本专题已完成' : '暂时没有可用题目' }}</h3>
+          <p v-if="practiceJob?.status === 'failed'" class="alert error-alert" role="alert">
+            {{ practiceJob.error || '补充练习未能生成，已完成的作答和进度仍然保留。' }}
+          </p>
+          <p v-else-if="generalPlan && !workspace.source_warning">
+            还可以按同一目标再生成一组练习，用来补充独立作答证据；已达补充上限时需补充资料或新建专题。
+          </p>
           <p>可在学习记录中回看作答和任务调整。</p>
-          <button v-if="workspace.status !== 'completed' && !workspace.source_warning" class="btn secondary" :disabled="busy || running"
-            @click="action(() => advance(false))">检查下一步</button>
+          <div class="inline-actions">
+            <button v-if="generalPlan && workspace.status !== 'completed' && !workspace.source_warning"
+              class="btn primary" :disabled="busy || running || !modelReady" @click="replenish">
+              {{ running ? '正在准备练习…' : '再练一组' }}
+            </button>
+            <button v-if="practiceJob?.status === 'failed'" class="btn secondary" :disabled="busy || running"
+              @click="retry(practiceJob.id)">重试补充练习</button>
+            <button v-if="!generalPlan && workspace.status !== 'completed' && !workspace.source_warning" class="btn secondary"
+              :disabled="busy || running" @click="action(() => advance(false))">检查下一步</button>
+          </div>
         </section>
       </template>
     </template>

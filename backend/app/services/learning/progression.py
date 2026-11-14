@@ -81,19 +81,40 @@ def recompute(db, workspace):
     db.flush()
 
 
-def recommend_general(db, trigger, current, pending):
+def recommend_general(db, trigger, current, pending, tasks=()):
     related = [task for task in pending if task.capability_id == current.capability_id]
+    labels = {
+        item.get("focus"): item.get("description")
+        for task in tasks if task.capability_id == current.capability_id
+        for item in task.rubric if item.get("focus")
+    }
+    clues = "".join(
+        f" 当前线索：{labels.get(obstacle.obstacle_code, obstacle.obstacle_code)}"
+        f"（{'有重复证据' if obstacle.status == 'confirmed' else '疑似'}，{len(obstacle.evidence_refs)}条作答）。"
+        for obstacle in db.scalars(
+            select(LearningObstacle).where(
+                LearningObstacle.capability_id == current.capability_id,
+                LearningObstacle.status.in_(["suspected", "confirmed"]),
+            )
+        ).all()
+    )
     if not passed(trigger):
         missing = {item["criterion_id"] for item in trigger.assessment["criteria"] if item["verdict"] != "met"}
         standards = [item for item in current.rubric if item["id"] in missing]
-        focus = {item["focus"] for item in standards}
-        targeted = next((task for task in related if focus & {item["focus"] for item in task.rubric}), None)
+        focus = {item["focus"] for item in standards if item.get("focus")}
+        targeted = [
+            task for task in related
+            if focus & {item["focus"] for item in task.rubric if item.get("focus")}
+        ]
+        # A different family is what separates a repeated misunderstanding from a one-off slip.
+        chosen = next((task for task in targeted if task.task_family != current.task_family), None)
+        chosen = chosen or (targeted[0] if targeted else None)
         reason = "需要补充作答证据：" + "、".join(item["description"] for item in standards)
-        if targeted:
-            return targeted, reason + "。下一题会继续检验相关标准。"
+        if chosen:
+            return chosen, reason + "。下一题会继续检验相关标准。" + clues
         if related:
-            return related[0], reason + "。先用同一能力下的其他练习补充证据。"
-        return None, reason + "。当前没有该能力的可用补练题。"
+            return related[0], reason + "。先用同一能力下的其他练习补充证据。" + clues
+        return None, reason + "。当前没有该能力的可用补练题。" + clues
     independent = db.execute(
         select(LearningTask.task_family, LearningAttempt)
         .join(LearningAttempt, LearningAttempt.task_id == LearningTask.id)
@@ -109,13 +130,13 @@ def recommend_general(db, trigger, current, pending):
     else:
         reason = "本次独立满足标准。"
     if variant:
-        return variant, reason + "接下来用不同题目家族补充独立作答证据。"
+        return variant, reason + "接下来用不同题目家族补充独立作答证据。" + clues
     next_capability = next((task for task in pending if task.capability_id != current.capability_id), None)
     if next_capability:
-        return next_capability, reason + "下一项能力的先修条件已满足，可以继续。"
+        return next_capability, reason + "下一项能力的先修条件已满足，可以继续。" + clues
     if related:
-        return related[0], reason + "当前缺少可用的独立变式，仍可继续同类练习。"
-    return None, reason + "当前缺少可用变式或先修条件尚未满足。"
+        return related[0], reason + "当前缺少可用的独立变式，仍可继续同类练习。" + clues
+    return None, reason + "当前缺少可用变式或先修条件尚未满足。" + clues
 
 
 def choose_next(db, workspace, trigger=None, skip=False, request_key=None):
@@ -152,7 +173,7 @@ def choose_next(db, workspace, trigger=None, skip=False, request_key=None):
     if trigger and not trigger.invalidated:
         current = next(t for t in tasks if t.id == trigger.task_id)
     if trigger and not trigger.invalidated and use_general:
-        selected, reason = recommend_general(db, trigger, current, pending)
+        selected, reason = recommend_general(db, trigger, current, pending, tasks)
     elif trigger and not trigger.invalidated:
         related = [t for t in pending if t.capability_id == current.capability_id]
         weak = not passed(trigger)

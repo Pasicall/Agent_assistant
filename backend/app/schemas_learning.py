@@ -50,6 +50,10 @@ class NextRequest(VersionRequest):
     skip: bool = False
 
 
+class PracticeRequest(VersionRequest):
+    request_key: str = Field(min_length=8, max_length=64)
+
+
 class CorrectionRequest(VersionRequest):
     request_key: str = Field(min_length=8, max_length=64)
     attempt_id: str

@@ -18,6 +18,14 @@ const verdicts: Record<string, string> = { met: '满足标准', partial: '部分
       <ul><li v-for="criterion in attempt.assessment.criteria.filter(item => item.verdict !== 'met')" :key="criterion.criterion_id">{{ criterion.reason }}</li></ul>
     </section>
     <p v-if="reason"><strong>下一题理由</strong> {{ reason }}</p>
+    <section v-if="attempt.assessment.obstacle_candidates?.length">
+      <h4>疑似障碍（需其他题目独立确认）</h4>
+      <ul>
+        <li v-for="item in attempt.assessment.obstacle_candidates" :key="item.code">
+          <template v-if="item.label"><strong>{{ item.label }}</strong> · </template>{{ item.alternative_explanation }}
+        </li>
+      </ul>
+    </section>
     <details>
       <summary>本次题目与作答</summary>
       <p v-if="task" class="learning-text">{{ task.prompt }}</p>
@@ -32,7 +40,6 @@ const verdicts: Record<string, string> = { met: '满足标准', partial: '部分
         <blockquote v-for="(quote, index) in criterion.student_evidence" :key="index">{{ quote.quote }}</blockquote>
         <small v-if="criterion.source_ids.length">{{ criterion.source_ids.map(sourceName).join(' · ') }}</small>
       </article>
-      <p v-for="item in attempt.assessment.obstacle_candidates" :key="item.code">{{ item.alternative_explanation }}</p>
       <div v-if="showActions" class="inline-actions">
         <button v-if="!task?.restricted" class="text-button" @click="emit('evidence')">查看原文（记录第 2 级帮助）</button>
         <button v-if="!attempt.invalidated" class="text-button" @click="emit('dispute')">我不同意这个判断</button>

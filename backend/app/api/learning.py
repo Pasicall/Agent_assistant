@@ -30,6 +30,7 @@ from app.schemas_learning import (
     LearningCreate,
     NextRequest,
     PlanEdit,
+    PracticeRequest,
 )
 from app.services.answering import llm_ready
 from app.services.corpus import CorpusScope
@@ -598,8 +599,10 @@ def retry(jid: str, db: DB, user: CurrentUser):
         check_sources(db, workspace, task.source_ids)
         attempt.assessment_status = "queued"
     elif job.kind == general.JOB_KIND:
-        if workspace.status != "draft" or workspace.state_version != job.input_version:
-            raise HTTPException(409, "草稿已变更，请重新核对并确认能力")
+        replenish = bool((job.input_payload or {}).get("replenish"))
+        expected = "needs_practice" if replenish else "draft"
+        if workspace.status != expected or workspace.state_version != job.input_version:
+            raise HTTPException(409, "专题状态已变化，请补充练习前重新核对当前进度")
         if not llm_ready():
             raise HTTPException(503, "请配置生成模型后再重试练习")
         general.scoped_documents(db, user, workspace, require_same=True)
@@ -747,6 +750,55 @@ def next_task(wid: str, body: NextRequest, db: DB, user: CurrentUser):
     choose_next(db, workspace, skip=body.skip, request_key=body.request_key)
     db.commit()
     return detail(db, workspace)
+
+
+@router.post("/workspaces/{wid}/practice", status_code=202)
+def replenish_practice(wid: str, body: PracticeRequest, db: DB, user: CurrentUser):
+    """Generate a new bounded batch for capabilities that still lack independent evidence."""
+    workspace = own(db, user, wid)
+    if workspace.plan_version != general.GENERAL_PLAN:
+        raise HTTPException(409, "固定题库版本不能再生成练习；请新建专题")
+    lock(db, workspace)
+    # The command has no payload beyond its workspace, so a retried key is always the same intent.
+    value_hash = digest([wid])
+    existing = db.scalar(
+        select(LearningJob).where(LearningJob.user_id == user.id, LearningJob.request_key == body.request_key)
+    )
+    if existing:
+        if existing.workspace_id != wid or not (existing.input_payload or {}).get("replenish") \
+                or existing.body_hash != value_hash:
+            raise HTTPException(409, "同一请求标识不能用于其他操作")
+        return {**detail(db, workspace), "job": job_payload(existing)}
+    if workspace.state_version != body.state_version:
+        raise HTTPException(409, "学习状态已更新，请刷新后重试")
+    if workspace.current_task_id:
+        raise HTTPException(409, "当前还有待完成的题目，请先作答或跳过")
+    if workspace.status not in {"active", "needs_practice"}:
+        raise HTTPException(409, "当前专题状态不能再补充练习")
+    not_busy(db, workspace)
+    if not llm_ready():
+        raise HTTPException(503, "请配置生成模型后再补充练习")
+    batches = sum(
+        1 for job in db.scalars(
+            select(LearningJob).where(
+                LearningJob.workspace_id == wid, LearningJob.kind == general.JOB_KIND
+            )
+        ) if (job.input_payload or {}).get("replenish")
+    )
+    if batches >= general.MAX_PRACTICE_BATCHES:
+        raise HTTPException(429, "本专题已补充练习多次，请补充资料或新建专题")
+    general.scoped_documents(db, user, workspace, require_same=True)
+    capability_ids = general.replenish_capabilities(db, workspace)
+    workspace.status = "preparing"
+    workspace.state_version += 1
+    job = LearningJob(
+        workspace_id=wid, user_id=user.id, request_key=body.request_key, body_hash=value_hash,
+        kind=general.JOB_KIND, target_id=wid, input_version=workspace.state_version,
+        input_payload={"capability_ids": capability_ids, "replenish": True},
+    )
+    db.add(job)
+    db.commit()
+    return {**detail(db, workspace), "job": job_payload(job)}
 
 
 @router.delete("/workspaces/{wid}", status_code=204)
